@@ -28,6 +28,7 @@ final class GameViewController: UIViewController {
     private var isThrottling = false
     private var isBraking    = false
     private var hudUpdatePending = false
+    private var boostSatTimer: Float = 0
 
     private lazy var boostButton:    UIButton = makeBoostButton()
     private lazy var throttleButton: UIButton = makeThrottleButton()
@@ -51,10 +52,25 @@ final class GameViewController: UIViewController {
     }()
     private var levelHasBeenReady = false
 
+    // Split time
+    private lazy var splitLabel: UILabel = {
+        let l = UILabel(); l.font = .monospacedSystemFont(ofSize: 16, weight: .bold)
+        l.textAlignment = .center; l.alpha = 0; return l
+    }()
+    private var bestSplits: [Float] = []
+
+    // Near-miss flash
+    private lazy var nearMissEdge: UIView = {
+        let v = UIView(); v.isUserInteractionEnabled = false
+        v.layer.borderColor = UIColor(red: 1.0, green: 0.95, blue: 0.5, alpha: 0.6).cgColor
+        v.layer.borderWidth = 0; v.alpha = 0; return v
+    }()
+
     // MARK: - Audio
     private let audioEngine  = AVAudioEngine()
     private let audioState   = AudioState()
     private var hapticEngine: CHHapticEngine?
+    private var continuousHapticPlayer: CHHapticAdvancedPatternPlayer?
 
     // MARK: - Lifecycle
     override func viewDidLoad() {
@@ -67,6 +83,7 @@ final class GameViewController: UIViewController {
         scnView.isPlaying = false
         motion.stopDeviceMotionUpdates()
         audioEngine.stop()
+        stopContinuousHaptic()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -89,6 +106,8 @@ final class GameViewController: UIViewController {
         crashOverlay.frame   = CGRect(x: b.midX - cw/2, y: b.midY - ch/2, width: cw, height: ch)
         speedBar.frame       = CGRect(x: b.maxX - 28, y: b.midY - 60, width: 10, height: 120)
         loadingLabel.frame   = CGRect(x: b.midX - 100, y: b.midY - 12, width: 200, height: 24)
+        splitLabel.frame     = CGRect(x: b.midX - 80, y: b.minY + 46, width: 160, height: 28)
+        nearMissEdge.frame   = b
         speedLabel.frame     = CGRect(x: b.maxX - 54, y: b.midY + 64, width: 62, height: 18)
         // Boost ring tracks the boost button
         let ringPath = UIBezierPath(arcCenter: CGPoint(x: 34, y: 34), radius: 37,
@@ -98,9 +117,11 @@ final class GameViewController: UIViewController {
 
     // MARK: - Setup
     private func setupView() {
+        view.backgroundColor = .black
         scnView.frame = view.bounds; scnView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scnView.antialiasingMode = quality.msaaMode
         scnView.preferredFramesPerSecond = 60; scnView.backgroundColor = .black
+        scnView.alpha = 0  // hidden until level trees are ready
         view.addSubview(scnView)
     }
 
@@ -122,6 +143,8 @@ final class GameViewController: UIViewController {
         view.addSubview(boostButton); view.addSubview(menuButton)
         view.addSubview(speedBar); view.addSubview(speedLabel)
         view.addSubview(loadingLabel)
+        view.addSubview(splitLabel)
+        view.addSubview(nearMissEdge)
         // Hide gameplay controls until level is ready
         throttleButton.alpha = 0; brakeButton.alpha = 0; boostButton.alpha = 0
         speedBar.alpha = 0; speedLabel.alpha = 0; timerLabel.alpha = 0
@@ -140,14 +163,46 @@ final class GameViewController: UIViewController {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
         hapticEngine = try? CHHapticEngine()
         try? hapticEngine?.start()
+        startContinuousHaptic()
+    }
+
+    private func startContinuousHaptic() {
+        guard let engine = hapticEngine else { return }
+        let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
+            CHHapticEventParameter(parameterID: .hapticIntensity, value: 0),
+            CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
+        ], relativeTime: 0, duration: 300)
+        guard let pattern = try? CHHapticPattern(events: [event], parameters: []) else { return }
+        continuousHapticPlayer = try? engine.makeAdvancedPlayer(with: pattern)
+        try? continuousHapticPlayer?.start(atTime: CHHapticTimeImmediate)
+    }
+
+    private func stopContinuousHaptic() {
+        try? continuousHapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+        continuousHapticPlayer = nil
     }
 
     private func setupCallbacks() {
         gameScene.onCrash = { [weak self] in
-            // Already dispatched to main by triggerCrash
             self?.playCrashHaptic()
             self?.doCrashShake()
         }
+        gameScene.onNearMiss = { [weak self] closeness in
+            guard let self = self else { return }
+            self.playHaptic(intensity: closeness * 0.6, sharpness: 0.3)
+            self.doNearMissFlash(intensity: closeness)
+        }
+        gameScene.onCheckpoint = { [weak self] index, time in
+            self?.showSplit(index: index, time: time)
+        }
+        // Load best splits
+        if let data = UserDefaults.standard.array(forKey: splitKey()) as? [Float] {
+            bestSplits = data
+        }
+    }
+
+    private func splitKey() -> String {
+        "\(mode == .race ? "race" : "inf")_\(difficulty.rawValue)_splits"
     }
 
     private func makeThrottleButton() -> UIButton {
@@ -212,8 +267,8 @@ final class GameViewController: UIViewController {
         // Idle hz ~55 Hz (above sub-bass); max hz ~125 Hz — clean engine tone range.
         let srcNode = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList -> OSStatus in
             let spd  = Double(state.speed)
-            let hz   = 55.0 + spd * 70.0         // 55 Hz idle → 125 Hz max boost
-            let pdt  = hz / sampleRate            // cycles per sample
+            let hz   = (55.0 + spd * 70.0) * (1.0 + state.boostPitchOffset)
+            let pdt  = hz / sampleRate
             let vol  = 0.18 + spd * 0.38
             let ablPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
             for frame in 0..<Int(frameCount) {
@@ -235,10 +290,9 @@ final class GameViewController: UIViewController {
         // Wind noise layer — filtered noise that builds with speed
         let windNode = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList -> OSStatus in
             let spd = Double(state.speed)
-            let vol = spd * spd * 0.12  // quadratic ramp — only audible at higher speeds
+            let vol = spd * spd * 0.12
             let ablPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
             for frame in 0..<Int(frameCount) {
-                // Simple filtered noise: LCG → low-pass via running average
                 state.windPhase = state.windPhase * 0.97 + Double.random(in: -1...1) * 0.03
                 let s = state.windPhase * vol
                 for buf in ablPtr {
@@ -397,6 +451,38 @@ final class GameViewController: UIViewController {
 
     // MARK: - Visual effects
 
+    private func doNearMissFlash(intensity: Float) {
+        nearMissEdge.layer.borderWidth = CGFloat(2 + intensity * 4)
+        nearMissEdge.alpha = CGFloat(intensity * 0.7)
+        UIView.animate(withDuration: 0.25, delay: 0, options: .curveEaseOut) {
+            self.nearMissEdge.alpha = 0
+        }
+    }
+
+    private func showSplit(index: Int, time: Float) {
+        let hasBest = index - 1 < bestSplits.count
+        if hasBest {
+            let bestTime = bestSplits[index - 1]
+            let diff = time - bestTime
+            if diff <= 0 {
+                splitLabel.text = String(format: "-%.2fs", -diff)
+                splitLabel.textColor = UIColor(red: 0.30, green: 0.90, blue: 0.45, alpha: 1)
+            } else {
+                splitLabel.text = String(format: "+%.2fs", diff)
+                splitLabel.textColor = UIColor(red: 1.0, green: 0.40, blue: 0.25, alpha: 1)
+            }
+        } else {
+            splitLabel.text = BestTimes.formatTime(time)
+            splitLabel.textColor = UIColor(white: 0.9, alpha: 0.9)
+        }
+        splitLabel.alpha = 1; splitLabel.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
+        UIView.animate(withDuration: 0.2) { self.splitLabel.transform = .identity }
+        UIView.animate(withDuration: 0.5, delay: 1.8, options: []) {
+            self.splitLabel.alpha = 0
+        }
+        playHaptic(intensity: 0.4, sharpness: 0.6)
+    }
+
     private func doCrashShake() {
         let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
         anim.values = [0, -12, 10, -8, 6, -3, 0]
@@ -451,11 +537,12 @@ final class GameViewController: UIViewController {
     }
 
     @objc private func boostPressed() {
-        guard gameScene.boostFraction > 0.15 else { return }  // not enough energy
+        guard gameScene.boostFraction > 0.15 else { return }
         gameScene.triggerBoost()
         playHaptic(intensity: 0.8, sharpness: 0.5)
         UIView.animate(withDuration: 0.06, animations: { self.boostButton.transform = CGAffineTransform(scaleX: 1.18, y: 1.18) },
                        completion: { _ in UIView.animate(withDuration: 0.10) { self.boostButton.transform = .identity } })
+        boostSatTimer = 0.5  // smooth saturation pulse handled in render loop
     }
 
     @objc private func resetPressed() {
@@ -478,7 +565,8 @@ final class GameViewController: UIViewController {
         if !levelHasBeenReady && gameScene.isLevelReady {
             levelHasBeenReady = true
             loadingLabel.isHidden = true
-            UIView.animate(withDuration: 0.4) {
+            UIView.animate(withDuration: 0.5) {
+                self.scnView.alpha = 1  // reveal the fully-loaded scene
                 self.throttleButton.alpha = 1; self.brakeButton.alpha = 1; self.boostButton.alpha = 1
                 self.speedBar.alpha = 1; self.speedLabel.alpha = 1; self.timerLabel.alpha = 1
             }
@@ -520,8 +608,18 @@ final class GameViewController: UIViewController {
         case .finished:
             let score = gameScene.raceTime
             timerLabel.text = BestTimes.formatTime(score)
-            if finishOverlay.isHidden {
+            // Wait for finish camera sweep to end before showing overlay
+            if finishOverlay.isHidden && !gameScene.finishCamActive {
                 BestTimes.save(score, difficulty, mode)
+                // Save checkpoint splits for future comparison
+                let splits = gameScene.checkpointTimes
+                if !splits.isEmpty {
+                    let existing = UserDefaults.standard.array(forKey: splitKey()) as? [Float] ?? []
+                    if existing.isEmpty || score < (BestTimes.get(difficulty, mode) ?? Float.greatestFiniteMagnitude) {
+                        UserDefaults.standard.set(splits, forKey: splitKey())
+                        bestSplits = splits
+                    }
+                }
                 finishTimeLabel.text = mode == .race ? BestTimes.formatTime(score)
                                                      : String(format: "%.1f km", gameScene.distanceCovered / 1000)
                 if let best = BestTimes.get(difficulty, mode) {
@@ -532,18 +630,9 @@ final class GameViewController: UIViewController {
             }
         case .crashed:
             if crashOverlay.isHidden {
-                crashTryAgainBtn?.isEnabled = false
-                crashTryAgainBtn?.alpha = 0.35
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    guard let self, self.gameScene.raceState == .crashed else { return }
-                    UIView.animate(withDuration: 0.25) { self.crashOverlay.alpha = 1.0 }
-                    self.crashOverlay.isHidden = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                        self?.crashTryAgainBtn?.isEnabled = true
-                        UIView.animate(withDuration: 0.3) { self?.crashTryAgainBtn?.alpha = 1.0 }
-                    }
-                }
-                crashOverlay.alpha = 0
+                crashTryAgainBtn?.isEnabled = true
+                crashTryAgainBtn?.alpha = 1.0
+                crashOverlay.alpha = 1.0
                 crashOverlay.isHidden = false
             }
         }
@@ -560,6 +649,7 @@ private final class AudioState {
     var phase: Double = 0
     var speed: Float  = 0
     var windPhase: Double = 0
+    var boostPitchOffset: Double = 0
 }
 
 // MARK: - SCNSceneRendererDelegate
@@ -569,6 +659,32 @@ extension GameViewController: SCNSceneRendererDelegate {
         let dt = Float(min(time - lastTime, 1.0 / 20.0)); lastTime = time
         gameScene.update(dt: dt, steer: resolveSteer(), throttling: isThrottling, braking: isBraking)
         audioState.speed = max(0, gameScene.currentSpeed) / 80.0
+
+        // Boost engine pitch offset — spike on activate, spool down
+        if gameScene.isBoosting {
+            audioState.boostPitchOffset = min(0.35, audioState.boostPitchOffset + Double(dt) * 2.0)
+        } else {
+            audioState.boostPitchOffset = max(0, audioState.boostPitchOffset - Double(dt) * 0.7)
+        }
+
+        // Smooth boost saturation pulse
+        if boostSatTimer > 0 {
+            boostSatTimer = max(0, boostSatTimer - dt)
+        }
+        if let cam = gameScene.cameraNode.camera {
+            let baseSat = Float(quality.saturation)
+            let satBoost = boostSatTimer > 0 ? min(boostSatTimer * 2, 0.4) : Float(0)
+            let targetSat = baseSat + satBoost
+            let curSat = Float(cam.saturation)
+            cam.saturation = CGFloat(curSat + (targetSat - curSat) * min(1, dt * 6))
+        }
+
+        // Continuous speed haptic — subtle rumble that scales with speed
+        let speedHaptic = gameScene.speedFraction * gameScene.speedFraction * 0.22
+        try? continuousHapticPlayer?.sendParameters(
+            [CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: speedHaptic, relativeTime: 0)],
+            atTime: CHHapticTimeImmediate)
+
         if !hudUpdatePending { hudUpdatePending = true; DispatchQueue.main.async { self.updateHUD() } }
     }
 

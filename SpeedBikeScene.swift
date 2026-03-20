@@ -16,6 +16,8 @@ final class SpeedBikeScene: SCNScene {
 
     private(set) var isLevelReady: Bool = false
     var onCrash: (() -> Void)?
+    var onNearMiss: ((Float) -> Void)?       // closeness 0..1
+    var onCheckpoint: ((Int, Float) -> Void)? // index, raceTime
     var distanceCovered: Float { max(0, worldZ) }
     var currentSpeed:    Float { forwardSpeed }
     var speedFraction:   Float { max(0, forwardSpeed) / maxBoostSpeed }
@@ -53,6 +55,29 @@ final class SpeedBikeScene: SCNScene {
     private var treeRoot     = SCNNode()
     private var skyNodes:    [SCNNode] = []
     private var thrusterTrail: SCNParticleSystem?
+    private var pollenSystem: SCNParticleSystem?
+
+    // Near-miss
+    private let nearMissThreshold: Float = 2.8
+    private var nearMissCooldown: Float = 0
+
+    // Checkpoint
+    private(set) var lastCheckpointIndex: Int = -1
+    private(set) var checkpointTimes: [Float] = []
+
+    // Finish spectacle
+    private(set) var finishCamActive: Bool = false
+    private var finishCamTimer: Float = 0
+    private var finishWorldPos: SCNVector3 = .init()
+
+    // Boost effects
+    private var boostFOVKick: Double = 0
+    private var boostJustActivated: Bool = false
+
+    // Dynamic fog
+    private let fogColorOpen  = UIColor(red: 0.42, green: 0.62, blue: 0.76, alpha: 1)
+    private let fogColorDense = UIColor(red: 0.34, green: 0.52, blue: 0.38, alpha: 1)
+    private var currentFogLerp: Float = 0
 
 
     // MARK: - Trees (indices 0-2 = broadleaf small/med/large, 3-4 = conifers, 5 = dead tree)
@@ -105,6 +130,7 @@ final class SpeedBikeScene: SCNScene {
         heading = spawnHeading()
         buildSpeeder()
         buildCamera()
+        buildCanopyShadows()
 
         if mode == .infinite {
             lastTreeZ = worldZ
@@ -122,7 +148,10 @@ final class SpeedBikeScene: SCNScene {
         bankAngle = 0; pitchAngle = 0; velocityY = 0
         camBankAngle = 0; currentFOV = 88; boostTimer = 0; boostEnergy = 1.0
         timeAccum = 0; raceState = .waiting; raceTime = 0
-        isBoosting = false
+        isBoosting = false; nearMissCooldown = 0
+        lastCheckpointIndex = -1; checkpointTimes = []
+        finishCamActive = false; finishCamTimer = 0
+        boostFOVKick = 0; boostJustActivated = false; currentFogLerp = 0
         speederPivot.isHidden = false
         speederPivot.position = SCNVector3(worldX, 2, worldZ)
         if mode == .infinite {
@@ -196,6 +225,31 @@ final class SpeedBikeScene: SCNScene {
         sunNode.position = SCNVector3(480, 430, -880); rootNode.addChildNode(sunNode)
     }
 
+    // MARK: - Canopy shadow patches on ground
+    private func buildCanopyShadows() {
+        let maxZ = mode == .race ? trackLength : Float(800)
+        var rng: UInt64 = 0x12345678
+        func rnd() -> Float {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(rng >> 33) / Float(1 << 31)
+        }
+        let shadowMat = SCNMaterial()
+        shadowMat.diffuse.contents = UIColor(red: 0.02, green: 0.06, blue: 0.02, alpha: 1)
+        shadowMat.lightingModel = .constant; shadowMat.transparency = 0.22; shadowMat.writesToDepthBuffer = false
+        var z: Float = 60
+        while z < maxZ {
+            let tc = trackCenterX(z)
+            let w = CGFloat(8 + rnd() * 10); let h = CGFloat(5 + rnd() * 6)
+            let plane = SCNPlane(width: w, height: h); plane.firstMaterial = shadowMat
+            let n = SCNNode(geometry: plane)
+            n.eulerAngles.x = -.pi / 2
+            n.position = SCNVector3(tc + (rnd() - 0.5) * corridorHalf * 1.2, 0.02, z)
+            n.castsShadow = false
+            rootNode.addChildNode(n)
+            z += 90 + rnd() * 60
+        }
+    }
+
     // MARK: - Ground
     private func buildGround() {
         let floor = SCNFloor()
@@ -255,11 +309,11 @@ final class SpeedBikeScene: SCNScene {
     // MARK: - Track path
 
     func trackCenterX(_ z: Float) -> Float {
-        // Grand sweeping bends with long straights between
-        let wide   = 70 * sin(z / 420)                          // huge long-period sweeps
-        let medium = 38 * sin(z / 170 + 0.8)                    // mid-frequency bends
-        let tight  = 14 * sin(z / 65 + 2.2)                     // quick chicanes
-        let wiggle =  4 * sin(z / 28 + 1.5)                     // road texture
+        // Dramatic sweeping bends — encourages tree shortcuts
+        let wide   = 130 * sin(z / 380)                         // huge long-period sweeps
+        let medium =  70 * sin(z / 150 + 0.8)                   // mid-frequency bends
+        let tight  =  28 * sin(z / 55 + 2.2)                    // quick chicanes
+        let wiggle =   6 * sin(z / 28 + 1.5)                    // road texture
         return wide + medium + tight + wiggle
     }
 
@@ -273,7 +327,7 @@ final class SpeedBikeScene: SCNScene {
 
     // Returns a [0,1] scalar indicating how tight the current curve is (0=straight, 1=apex)
     private func curvature(_ z: Float) -> Float {
-        let dx = 70/420 * cos(z/420) + 38/170 * cos(z/170 + 0.8) + 14/65 * cos(z/65 + 2.2)
+        let dx = 130/380 * cos(z/380) + 70/150 * cos(z/150 + 0.8) + 28/55 * cos(z/55 + 2.2)
         return min(1, abs(dx) / 0.65)
     }
 
@@ -749,20 +803,67 @@ final class SpeedBikeScene: SCNScene {
             cam.wantsDepthOfField = true; cam.fStop = 5.6; cam.focalBlurSampleCount = 4
         }
         cameraNode.camera = cam; rootNode.addChildNode(cameraNode)
+        buildPollenParticles()
+    }
+
+    // MARK: - Floating pollen / dust motes
+    private func buildPollenParticles() {
+        let p = SCNParticleSystem()
+        p.birthRate = 6; p.emissionDuration = -1
+        p.particleLifeSpan = 5.0; p.particleLifeSpanVariation = 2.0
+        p.particleSize = 0.04; p.particleSizeVariation = 0.025
+        p.spreadingAngle = 180; p.particleVelocity = 0.4; p.particleVelocityVariation = 0.3
+        p.emittingDirection = SCNVector3(0.2, 0.1, 0)
+        p.particleColor = UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.45)
+        p.particleColorVariation = SCNVector4(0.05, 0.05, 0.1, 0.15)
+        p.blendMode = .additive; p.isLightingEnabled = false
+        p.emitterShape = SCNSphere(radius: 14)
+        pollenSystem = p
+        let dustNode = SCNNode()
+        dustNode.addParticleSystem(p)
+        cameraNode.addChildNode(dustNode)
     }
 
     // MARK: - Update
     func update(dt: Float, steer: Float, throttling: Bool, braking: Bool) {
         guard isLevelReady else { updateCamera(dt: dt); return }
         guard raceState != .crashed else { updateCamera(dt: dt); return }
+
+        // Finish spectacle — slow-mo camera orbit, skip physics
+        if finishCamActive {
+            timeAccum += dt
+            finishCamTimer += dt
+            forwardSpeed = max(0, forwardSpeed - 40 * dt) // decelerate
+            worldZ += cos(heading) * forwardSpeed * dt
+            worldX += sin(heading) * forwardSpeed * dt
+            updateFinishCamera(dt: dt)
+            return
+        }
+
         timeAccum += dt
+        nearMissCooldown = max(0, nearMissCooldown - dt)
 
         // Race state
         switch raceState {
         case .waiting: if worldZ > 5 { raceState = .racing }
         case .racing:
             raceTime += dt
-            if mode == .race && worldZ >= trackLength { raceState = .finished }
+            // Checkpoint detection (gates every 250m)
+            if mode == .race {
+                let cpIdx = Int(worldZ / 250)
+                if cpIdx > lastCheckpointIndex && cpIdx > 0 && worldZ < trackLength {
+                    lastCheckpointIndex = cpIdx
+                    checkpointTimes.append(raceTime)
+                    DispatchQueue.main.async { self.onCheckpoint?(cpIdx, self.raceTime) }
+                }
+                if worldZ >= trackLength {
+                    raceState = .finished
+                    finishCamActive = true; finishCamTimer = 0
+                    finishWorldPos = SCNVector3(worldX, speederY, worldZ)
+                    // Celebratory particles at finish
+                    spawnFinishCelebration(at: finishWorldPos)
+                }
+            }
         case .finished: break
         case .crashed: break
         }
@@ -787,9 +888,8 @@ final class SpeedBikeScene: SCNScene {
             }
         }
 
-        // Steering — reduce turn rate at low speed to prevent spinning in place
-        let speedSteerFactor = min(1.0, forwardSpeed / 12.0)
-        turnRate += (steer * maxTurnRate * speedSteerFactor - turnRate) * min(1, dt * 5.5)
+        // Steering — allow full rotation even at standstill
+        turnRate += (steer * maxTurnRate - turnRate) * min(1, dt * 5.5)
         heading  += turnRate * dt
 
         // Position
@@ -832,18 +932,23 @@ final class SpeedBikeScene: SCNScene {
     }
 
     private func updateCamera(dt: Float) {
-        // Camera — pulled back to see full bike
         let camDist: Float = 5.5
         camY += (speederY + 1.60 - camY) * min(1, dt * 7)
         camY  = max(camY, speederY + 0.70)
         let speedRatio = Double(forwardSpeed / maxBoostSpeed)
         let t = forwardSpeed / maxBoostSpeed
-        let shake = t * (1.8 - t * 0.9)
-        let shX = (sin(timeAccum * 61.3) * 0.020 + sin(timeAccum * 127.7) * 0.008) * shake
-        let shY = (sin(timeAccum * 43.1) * 0.010 + sin(timeAccum * 97.9)  * 0.005) * shake
-        cameraNode.position = SCNVector3(worldX - sin(heading)*camDist + shX,
+
+        // Enhanced camera shake — quadratic ramp, multi-frequency, lateral drift
+        let shake = t * t * 3.0
+        let shX = (sin(timeAccum * 61.3) * 0.018 + sin(timeAccum * 127.7) * 0.008 + sin(timeAccum * 203.7) * 0.004) * shake
+        let shY = (sin(timeAccum * 43.1) * 0.010 + sin(timeAccum * 97.9) * 0.005) * shake
+        let lateralDrift = sin(timeAccum * 7.3) * t * t * 0.12  // slow side weave
+        let perpX = -cos(heading) * lateralDrift
+        let perpZ =  sin(heading) * lateralDrift
+
+        cameraNode.position = SCNVector3(worldX - sin(heading)*camDist + shX + perpX,
                                          camY + shY,
-                                         worldZ - cos(heading)*camDist)
+                                         worldZ - cos(heading)*camDist + perpZ)
         let lookDist: Float = 10 + Float(speedRatio) * 18
         cameraNode.look(at: SCNVector3(worldX + sin(heading)*lookDist, speederY - 0.30, worldZ + cos(heading)*lookDist),
                         up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
@@ -852,16 +957,18 @@ final class SpeedBikeScene: SCNScene {
         cameraNode.simdOrientation = simd_mul(cameraNode.simdOrientation,
                                               simd_quatf(angle: camBankAngle, axis: SIMD3<Float>(0, 0, 1)))
 
-        // FOV
-        currentFOV += (88.0 + speedRatio * 36.0 - currentFOV) * Double(min(1, dt * 7))
+        // FOV — with boost kick
+        boostFOVKick = max(0, boostFOVKick - Double(dt) * 12)
+        let targetFOV = 88.0 + speedRatio * 36.0 + boostFOVKick
+        currentFOV += (targetFOV - currentFOV) * Double(min(1, dt * 3.5))
         cameraNode.camera?.fieldOfView = currentFOV
 
-        // Motion blur — scales with speed
+        // Motion blur
         let targetBlur = speedRatio * 0.46
         let curBlur    = Double(cameraNode.camera?.motionBlurIntensity ?? 0)
         cameraNode.camera?.motionBlurIntensity = CGFloat(curBlur + (targetBlur - curBlur) * Double(min(1, dt*4)))
 
-        // DOF — subtle cinematic depth on high quality
+        // DOF
         if quality == .high, let cam = cameraNode.camera {
             cam.focusDistance = CGFloat(lookDist * 0.7)
         }
@@ -872,17 +979,70 @@ final class SpeedBikeScene: SCNScene {
             streamTrees(zStart: worldZ - quality.streamRange * 0.6, zEnd: worldZ + quality.streamRange)
         }
 
-        // Thruster trail intensity — subtle exhaust wisps
-        let trailRate = CGFloat(max(0, forwardSpeed / maxBoostSpeed)) * 40 + (isBoosting ? 30 : 0)
-        thrusterTrail?.birthRate = trailRate
+        // Thruster trail — smooth boost transition
+        let targetTrailRate = CGFloat(max(0, forwardSpeed / maxBoostSpeed)) * 40 + (isBoosting ? 60 : 0)
+        if boostJustActivated { boostJustActivated = false }
+        let curRate = CGFloat(thrusterTrail?.birthRate ?? 0)
+        thrusterTrail?.birthRate = curRate + (targetTrailRate - curRate) * CGFloat(min(1, dt * 5))
         if isBoosting {
             thrusterTrail?.particleColor = UIColor(red: 0.8, green: 0.45, blue: 0.15, alpha: 0.35)
+            thrusterTrail?.particleSize = 0.06
         } else {
             thrusterTrail?.particleColor = UIColor(red: 0.3, green: 0.55, blue: 0.9, alpha: 0.25)
+            thrusterTrail?.particleSize = 0.04
         }
+
+        // Dynamic fog color — shifts warmer in tight curves
+        let curveIntensity = curvature(worldZ)
+        currentFogLerp += (curveIntensity - currentFogLerp) * min(1, dt * 2)
+        fogColor = lerpColor(fogColorOpen, fogColorDense, currentFogLerp)
 
         for n in skyNodes { n.position = SCNVector3(worldX, 0, worldZ) }
         sunNode.position = SCNVector3(worldX + 480, 430, worldZ - 880)
+    }
+
+    // MARK: - Finish camera sweep
+    private func updateFinishCamera(dt: Float) {
+        let orbitDur: Float = 3.5
+        let phase = finishCamTimer / orbitDur
+        if phase >= 1.0 { finishCamActive = false; return }
+        let angle = phase * .pi * 1.2  // ~216° sweep
+        let radius: Float = 8 + phase * 4  // pull out gradually
+        let camHeight: Float = speederY + 2 + phase * 5
+        cameraNode.position = SCNVector3(finishWorldPos.x + sin(angle) * radius,
+                                         camHeight,
+                                         finishWorldPos.z + cos(angle) * radius)
+        cameraNode.look(at: SCNVector3(finishWorldPos.x, speederY + 0.5, finishWorldPos.z),
+                        up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
+        // Slow zoom out FOV
+        cameraNode.camera?.fieldOfView = 88 - Double(phase) * 20
+    }
+
+    // MARK: - Finish celebration particles
+    private func spawnFinishCelebration(at position: SCNVector3) {
+        let gold = SCNParticleSystem()
+        gold.birthRate = 400; gold.emissionDuration = 0.8
+        gold.particleLifeSpan = 2.5; gold.particleLifeSpanVariation = 0.8
+        gold.particleSize = 0.15; gold.particleSizeVariation = 0.10
+        gold.spreadingAngle = 180; gold.particleVelocity = 14; gold.particleVelocityVariation = 8
+        gold.acceleration = SCNVector3(0, -3, 0)
+        gold.particleColor = UIColor(red: 1.0, green: 0.85, blue: 0.20, alpha: 1)
+        gold.particleColorVariation = SCNVector4(0.05, 0.15, 0.10, 0)
+        gold.blendMode = .additive; gold.isLightingEnabled = false
+        let node = SCNNode(); node.position = SCNVector3(position.x, position.y + 4, position.z)
+        rootNode.addChildNode(node)
+        node.addParticleSystem(gold)
+        node.runAction(.sequence([.wait(duration: 5), .removeFromParentNode()]))
+    }
+
+    // MARK: - Color lerp helper
+    private func lerpColor(_ a: UIColor, _ b: UIColor, _ t: Float) -> UIColor {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        a.getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        b.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        let ct = CGFloat(max(0, min(1, t)))
+        return UIColor(red: ar + (br-ar)*ct, green: ag + (bg-ag)*ct, blue: ab + (bb-ab)*ct, alpha: 1)
     }
 
     private func resolveObstacleCollisions() {
@@ -901,6 +1061,7 @@ final class SpeedBikeScene: SCNScene {
     private func resolveTreeCollisions() {
         let cx = Int(floorf(worldX / treeGridCell))
         let cz = Int(floorf(worldZ / treeGridCell))
+        var closestNearMiss: Float = Float.greatestFiniteMagnitude
         for gx in (cx - 1)...(cx + 1) {
             for gz in (cz - 1)...(cz + 1) {
                 let key = Int64(Int32(gx)) << 32 | Int64(bitPattern: UInt64(UInt32(bitPattern: Int32(gz))))
@@ -908,13 +1069,28 @@ final class SpeedBikeScene: SCNScene {
                 for tree in cell {
                     let dx = worldX - tree.x; let dz = worldZ - tree.z
                     let dist2 = dx*dx + dz*dz; let minD = tree.r + speederRadius
-                    guard dist2 < minD*minD, dist2 > 0.0001 else { continue }
-                    if forwardSpeed > 5 { triggerCrash(); return }
-                    let dist = sqrt(dist2)
-                    worldX += (dx/dist)*(minD-dist); worldZ += (dz/dist)*(minD-dist)
-                    forwardSpeed *= 0.88
+                    if dist2 < minD*minD && dist2 > 0.0001 {
+                        if forwardSpeed > 5 { triggerCrash(); return }
+                        let dist = sqrt(dist2)
+                        worldX += (dx/dist)*(minD-dist); worldZ += (dz/dist)*(minD-dist)
+                        forwardSpeed *= 0.88
+                    } else {
+                        // Near-miss detection
+                        let nearDist = minD + nearMissThreshold
+                        if dist2 < nearDist * nearDist && forwardSpeed > 15 {
+                            let dist = sqrt(dist2)
+                            let gap = dist - minD  // how far from collision
+                            closestNearMiss = min(closestNearMiss, gap)
+                        }
+                    }
                 }
             }
+        }
+        // Fire near-miss callback for the closest tree
+        if closestNearMiss < nearMissThreshold && nearMissCooldown <= 0 {
+            nearMissCooldown = 0.35
+            let closeness = 1.0 - (closestNearMiss / nearMissThreshold)  // 1 = almost hit, 0 = barely near
+            DispatchQueue.main.async { self.onNearMiss?(closeness) }
         }
     }
 
@@ -936,8 +1112,10 @@ final class SpeedBikeScene: SCNScene {
     var boostFraction: Float { boostEnergy }
 
     func triggerBoost() {
-        guard boostEnergy > 0.15 else { return }  // need at least 15% to activate
+        guard boostEnergy > 0.15 else { return }
         boostTimer = 2.5
+        boostFOVKick = 8
+        boostJustActivated = true
     }
 
     // MARK: - Crash
@@ -952,10 +1130,10 @@ final class SpeedBikeScene: SCNScene {
     private func spawnExplosion(at position: SCNVector3) {
         // Core fireball burst
         let ps = SCNParticleSystem()
-        ps.birthRate = 700; ps.emissionDuration = 0.14
-        ps.particleLifeSpan = 1.1; ps.particleLifeSpanVariation = 0.4
+        ps.birthRate = 900; ps.emissionDuration = 0.10
+        ps.particleLifeSpan = 0.4; ps.particleLifeSpanVariation = 0.15
         ps.particleSize = 0.38; ps.particleSizeVariation = 0.22
-        ps.spreadingAngle = 180; ps.particleVelocity = 16; ps.particleVelocityVariation = 9
+        ps.spreadingAngle = 180; ps.particleVelocity = 28; ps.particleVelocityVariation = 14
         ps.acceleration = SCNVector3(0, -4, 0)
         ps.particleColor = UIColor(red: 1.0, green: 0.55, blue: 0.10, alpha: 1)
         ps.particleColorVariation = SCNVector4(0.04, 0.28, 0.14, 0)
@@ -963,10 +1141,10 @@ final class SpeedBikeScene: SCNScene {
 
         // Debris sparks
         let sparks = SCNParticleSystem()
-        sparks.birthRate = 300; sparks.emissionDuration = 0.10
-        sparks.particleLifeSpan = 1.6; sparks.particleLifeSpanVariation = 0.6
+        sparks.birthRate = 400; sparks.emissionDuration = 0.08
+        sparks.particleLifeSpan = 0.5; sparks.particleLifeSpanVariation = 0.2
         sparks.particleSize = 0.12; sparks.particleSizeVariation = 0.08
-        sparks.spreadingAngle = 180; sparks.particleVelocity = 22; sparks.particleVelocityVariation = 12
+        sparks.spreadingAngle = 180; sparks.particleVelocity = 35; sparks.particleVelocityVariation = 16
         sparks.acceleration = SCNVector3(0, -9, 0)
         sparks.particleColor = UIColor(red: 1.0, green: 0.88, blue: 0.30, alpha: 1)
         sparks.blendMode = .additive; sparks.isLightingEnabled = false
@@ -975,7 +1153,7 @@ final class SpeedBikeScene: SCNScene {
         rootNode.addChildNode(node)
         node.addParticleSystem(ps)
         node.addParticleSystem(sparks)
-        node.runAction(.sequence([.wait(duration: 4.0), .removeFromParentNode()]))
+        node.runAction(.sequence([.wait(duration: 1.5), .removeFromParentNode()]))
     }
 }
 

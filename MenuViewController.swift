@@ -4,10 +4,10 @@ import SceneKit
 // MARK: - Shared game types (accessible across all files in module)
 
 enum Difficulty: String, CaseIterable {
-    case easy = "easy", medium = "medium", hard = "hard"
-    var displayName: String { rawValue.uppercased() }
-    var treeDensity: Float  { switch self { case .easy: return 0.40; case .medium: return 0.58; case .hard: return 0.74 } }
-    var clearZone:   Float  { switch self { case .easy: return 16.0; case .medium: return 13.5; case .hard: return 11.0 } }
+    case easy = "easy"
+    var displayName: String { "EASY" }
+    var treeDensity: Float  { 0.40 }
+    var clearZone:   Float  { 16.0 }
 }
 
 enum GameMode { case race, infinite }
@@ -71,13 +71,12 @@ struct BestTimes {
 /// Panel 0 = Title (home), Panel 1 = Game Select, Panel 2 = Settings
 final class MenuViewController: UIViewController {
 
-    private var selectedDifficulty: Difficulty      = .medium
+    private var selectedDifficulty: Difficulty      = .easy
     private var selectedMode:       GameMode        = .race
     private var selectedQuality:    GraphicsQuality = GraphicsQuality.saved
-    private var diffButtons:        [Difficulty: UIButton]      = [:]
     private var modeButtons:        [GameMode: UIButton]        = [:]
     private var qualityButtons:     [GraphicsQuality: UIButton] = [:]
-    private var bestLabels:         [Difficulty: UILabel]       = [:]
+    private var bestLabel:          UILabel?
     private var selectionLabel:     UILabel?
 
     // Panels
@@ -85,7 +84,7 @@ final class MenuViewController: UIViewController {
     private var currentPanel = 0
 
     override func viewDidLoad()      { super.viewDidLoad(); buildUI() }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshBestLabels() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshBestLabel() }
     override var prefersStatusBarHidden: Bool { true }
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscapeRight }
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
@@ -121,8 +120,8 @@ final class MenuViewController: UIViewController {
         }
 
         showPanel(0, animated: false)
-        refreshModeButtons(); refreshDiffButtons(); refreshQualityButtons()
-        refreshSelectionLabel()
+        refreshModeButtons(); refreshQualityButtons()
+        refreshSelectionLabel(); refreshBestLabel()
     }
 
     // MARK: - Panel builders
@@ -144,7 +143,7 @@ final class MenuViewController: UIViewController {
         divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
         divider.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
-        let selLbl = label("RACE  ·  MEDIUM", size: 12, weight: .semibold,
+        let selLbl = label("RACE", size: 12, weight: .semibold,
                            color: UIColor(red: 0.35, green: 0.85, blue: 0.50, alpha: 0.80))
         selectionLabel = selLbl
 
@@ -181,12 +180,10 @@ final class MenuViewController: UIViewController {
             modeButtons[m] = btn; modeRow.addArrangedSubview(btn)
         }
 
-        let diffTitle = label("DIFFICULTY", size: 10, weight: .semibold, color: UIColor(white: 0.5, alpha: 1))
-        diffTitle.letterSpacing(3)
-        let diffStack = UIStackView(); diffStack.axis = .horizontal; diffStack.spacing = 10
-        for d in Difficulty.allCases {
-            let card = diffCard(d); diffButtons[d] = card; diffStack.addArrangedSubview(card)
-        }
+        // Best time label
+        let bestLbl = label("--", size: 13, weight: .semibold,
+                            color: UIColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 0.85))
+        bestLabel = bestLbl
 
         let startBtn = makeStartButton()
 
@@ -199,7 +196,7 @@ final class MenuViewController: UIViewController {
         let stack = UIStackView(arrangedSubviews: [
             pageTitle, spacer(10),
             modeTitle, modeRow, spacer(8),
-            diffTitle, diffStack, spacer(14),
+            bestLbl, spacer(14),
             bottomRow,
         ])
         stack.axis = .vertical; stack.alignment = .center; stack.spacing = 6
@@ -267,14 +264,20 @@ final class MenuViewController: UIViewController {
     // MARK: - Button factories
 
     private func makeStartButton() -> UIButton {
-        let btn = UIButton(type: .custom)
-        btn.setTitle("▶  START", for: .normal)
-        btn.titleLabel?.font = .monospacedSystemFont(ofSize: 17, weight: .bold)
-        btn.setTitleColor(UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1), for: .normal)
-        btn.backgroundColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
-        btn.layer.cornerRadius = 12
-        btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: 32, bottom: 0, right: 32)
-        btn.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        var cfg = UIButton.Configuration.filled()
+        cfg.title = "START"
+        cfg.image = UIImage(systemName: "play.fill")
+        cfg.imagePadding = 8
+        cfg.imagePlacement = .leading
+        cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+        cfg.baseBackgroundColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
+        cfg.baseForegroundColor = UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 36, bottom: 12, trailing: 36)
+        cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var out = incoming; out.font = .monospacedSystemFont(ofSize: 17, weight: .bold); return out
+        }
+        let btn = UIButton(configuration: cfg)
+        btn.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         btn.addTarget(self, action: #selector(startTapped), for: .touchUpInside)
         let pulse = CABasicAnimation(keyPath: "transform.scale")
         pulse.fromValue = 1.0; pulse.toValue = 1.03
@@ -284,56 +287,41 @@ final class MenuViewController: UIViewController {
     }
 
     private func navButton(_ title: String, action: Selector, secondary: Bool = false) -> UIButton {
-        let btn = UIButton(type: .custom)
-        btn.setTitle(title, for: .normal)
-        btn.titleLabel?.font = .monospacedSystemFont(ofSize: 14, weight: .bold)
+        var cfg = UIButton.Configuration.filled()
+        cfg.attributedTitle = AttributedString(title, attributes: AttributeContainer([
+            .font: UIFont.monospacedSystemFont(ofSize: 14, weight: .bold)
+        ]))
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 24)
+        cfg.cornerStyle = .fixed
+        if secondary {
+            cfg.baseBackgroundColor = UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
+            cfg.baseForegroundColor = UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1)
+        } else {
+            cfg.baseBackgroundColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
+            cfg.baseForegroundColor = UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
+        }
+        let btn = UIButton(configuration: cfg)
         btn.layer.cornerRadius = 12
         btn.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: 24, bottom: 0, right: 24)
         if secondary {
-            btn.setTitleColor(UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1), for: .normal)
-            btn.backgroundColor = UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
             btn.layer.borderWidth = 1.2
             btn.layer.borderColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 0.38).cgColor
-        } else {
-            btn.setTitleColor(UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1), for: .normal)
-            btn.backgroundColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
         }
         btn.addTarget(self, action: action, for: .touchUpInside)
         return btn
     }
 
     private func toggleBtn(_ title: String, tag: Int, action: Selector) -> UIButton {
-        let btn = UIButton(type: .custom)
-        btn.setTitle(title, for: .normal)
-        btn.titleLabel?.font = .monospacedSystemFont(ofSize: 14, weight: .bold)
+        var cfg = UIButton.Configuration.filled()
+        cfg.attributedTitle = AttributedString(title, attributes: AttributeContainer([
+            .font: UIFont.monospacedSystemFont(ofSize: 14, weight: .bold)
+        ]))
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 22, bottom: 8, trailing: 22)
+        cfg.cornerStyle = .fixed
+        let btn = UIButton(configuration: cfg)
         btn.layer.cornerRadius = 10; btn.layer.borderWidth = 1.5
-        btn.contentEdgeInsets = UIEdgeInsets(top: 8, left: 22, bottom: 8, right: 22)
         btn.tag = tag
         btn.addTarget(self, action: action, for: .touchUpInside)
-        return btn
-    }
-
-    private func diffCard(_ d: Difficulty) -> UIButton {
-        let btn = UIButton(type: .custom)
-        btn.layer.cornerRadius = 12; btn.layer.borderWidth = 1.5
-        btn.contentEdgeInsets = UIEdgeInsets(top: 10, left: 18, bottom: 10, right: 18)
-        btn.widthAnchor.constraint(equalToConstant: 102).isActive = true
-        btn.heightAnchor.constraint(equalToConstant: 62).isActive = true
-        let stack = UIStackView(); stack.axis = .vertical; stack.alignment = .center; stack.spacing = 3
-        stack.isUserInteractionEnabled = false
-        let name = label(d.displayName, size: 15, weight: .bold, color: .white)
-        let best = label("--", size: 11, weight: .regular, color: UIColor(white: 0.65, alpha: 1))
-        stack.addArrangedSubview(name); stack.addArrangedSubview(best)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        btn.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: btn.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: btn.centerYAnchor),
-        ])
-        bestLabels[d] = best
-        btn.tag = Difficulty.allCases.firstIndex(of: d)!
-        btn.addTarget(self, action: #selector(diffTapped(_:)), for: .touchUpInside)
         return btn
     }
 
@@ -373,50 +361,35 @@ final class MenuViewController: UIViewController {
     // MARK: - State refresh
 
     private func refreshSelectionLabel() {
-        let mode = selectedMode == .race ? "RACE" : "INF"
-        let diff = selectedDifficulty.displayName
-        selectionLabel?.text = "\(mode)  ·  \(diff)"
+        let mode = selectedMode == .race ? "RACE" : "INFINITE"
+        selectionLabel?.text = mode
     }
 
     private func refreshModeButtons() {
         for (m, btn) in modeButtons {
             let sel = m == selectedMode
-            btn.setTitleColor(sel ? UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
-                                  : UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1), for: .normal)
-            btn.backgroundColor   = sel ? UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
-                                        : UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
+            btn.configuration?.baseBackgroundColor = sel ? UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
+                                                        : UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
+            btn.configuration?.baseForegroundColor = sel ? UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
+                                                        : UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1)
             btn.layer.borderColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: sel ? 1 : 0.35).cgColor
-        }
-    }
-
-    private func refreshDiffButtons() {
-        for (d, btn) in diffButtons {
-            let sel = d == selectedDifficulty
-            btn.backgroundColor   = sel ? UIColor(red: 0.08, green: 0.28, blue: 0.18, alpha: 0.88)
-                                        : UIColor(red: 0.06, green: 0.10, blue: 0.08, alpha: 0.70)
-            btn.layer.borderColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: sel ? 0.95 : 0.28).cgColor
-            if let nameLabel = (btn.subviews.compactMap { $0 as? UIStackView }.first?.arrangedSubviews.first as? UILabel) {
-                nameLabel.textColor = sel ? UIColor(red: 0.35, green: 0.95, blue: 0.60, alpha: 1)
-                                          : UIColor(white: 0.75, alpha: 1)
-            }
         }
     }
 
     private func refreshQualityButtons() {
         for (q, btn) in qualityButtons {
             let sel = q == selectedQuality
-            btn.setTitleColor(sel ? UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
-                                  : UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1), for: .normal)
-            btn.backgroundColor   = sel ? UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
-                                        : UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
+            btn.configuration?.baseBackgroundColor = sel ? UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: 1)
+                                                        : UIColor(red: 0.08, green: 0.14, blue: 0.10, alpha: 0.7)
+            btn.configuration?.baseForegroundColor = sel ? UIColor(red: 0.05, green: 0.08, blue: 0.14, alpha: 1)
+                                                        : UIColor(red: 0.55, green: 0.88, blue: 0.70, alpha: 1)
             btn.layer.borderColor = UIColor(red: 0.28, green: 0.82, blue: 0.50, alpha: sel ? 1 : 0.35).cgColor
         }
     }
 
-    private func refreshBestLabels() {
-        for d in Difficulty.allCases {
-            bestLabels[d]?.text = BestTimes.formatted(d, selectedMode)
-        }
+    private func refreshBestLabel() {
+        let best = BestTimes.formatted(.easy, selectedMode)
+        bestLabel?.text = best == "--" ? "" : "BEST  \(best)"
     }
 
     // MARK: - Navigation actions
@@ -429,12 +402,7 @@ final class MenuViewController: UIViewController {
 
     @objc private func modeTapped(_ sender: UIButton) {
         selectedMode = sender.tag == 0 ? .race : .infinite
-        refreshModeButtons(); refreshBestLabels(); refreshSelectionLabel()
-    }
-
-    @objc private func diffTapped(_ sender: UIButton) {
-        selectedDifficulty = Difficulty.allCases[sender.tag]
-        refreshDiffButtons(); refreshSelectionLabel()
+        refreshModeButtons(); refreshBestLabel(); refreshSelectionLabel()
     }
 
     @objc private func qualityTapped(_ sender: UIButton) {
@@ -471,9 +439,9 @@ final class MenuViewController: UIViewController {
         let spinRow = UIStackView(arrangedSubviews: [spinner, loadingLbl])
         spinRow.axis = .horizontal; spinRow.spacing = 10; spinRow.alignment = .center
 
-        // Mode / difficulty info
+        // Mode info
         let modeName = selectedMode == .race ? "RACE" : "INFINITE"
-        let infoLbl = label("\(modeName)  ·  \(selectedDifficulty.displayName)", size: 12, weight: .semibold,
+        let infoLbl = label(modeName, size: 12, weight: .semibold,
                             color: UIColor(red: 0.35, green: 0.85, blue: 0.50, alpha: 0.60))
         infoLbl.textAlignment = .center
 
