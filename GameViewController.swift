@@ -195,6 +195,9 @@ final class GameViewController: UIViewController {
         gameScene.onCheckpoint = { [weak self] index, time in
             self?.showSplit(index: index, time: time)
         }
+        gameScene.onSaplingSmashed = { [weak self] in
+            self?.playHaptic(intensity: 0.5, sharpness: 0.7)
+        }
         // Load best splits
         if let data = UserDefaults.standard.array(forKey: splitKey()) as? [Float] {
             bestSplits = data

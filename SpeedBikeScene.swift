@@ -80,12 +80,16 @@ final class SpeedBikeScene: SCNScene {
     private var currentFogLerp: Float = 0
 
 
-    // MARK: - Trees (indices 0-2 = broadleaf small/med/large, 3-4 = conifers, 5 = dead tree)
+    // MARK: - Trees
+    // 0-2 = broadleaf small/med/large, 3-4 = conifers, 5 = dead tree,
+    // 6 = birch, 7 = willow, 8 = twisted oak
+    // Saplings (destructible): 9 = thin sapling, 10 = young birch
     private var treeGeoms:  [SCNGeometry] = []
     private var canopyGeoms:[SCNGeometry] = []
-    private let treeHeights:[Float] = [22, 42, 65, 35, 55, 18]
-    private let canopyRadii:[Float] = [5.5, 9.0, 14.0, 5.0, 7.0, 0]
-    private let trunkRadii: [Float] = [0.42, 0.80, 1.40, 0.40, 0.60, 0.55]
+    private let treeHeights:[Float] = [22, 42, 65, 35, 55, 18,  28, 30, 20,   10, 12]
+    private let canopyRadii:[Float] = [5.5, 9.0, 14.0, 5.0, 7.0, 0,  4.5, 8.0, 6.0,  2.0, 2.5]
+    private let trunkRadii: [Float] = [0.42, 0.80, 1.40, 0.40, 0.60, 0.55,  0.30, 0.50, 0.70,  0.15, 0.12]
+    private let saplingIndices: Set<Int> = [9, 10]  // these are destructible
     private var bushGeoms:    [SCNGeometry] = []
     private let bushRadii:    [Float] = [0.65, 1.05, 1.55, 0.45]
     private var fernGeoms:    [SCNGeometry] = []
@@ -94,10 +98,18 @@ final class SpeedBikeScene: SCNScene {
     private var giantCanopyGeo: SCNGeometry?
     private var lastTreeZ:  Float   = Float.infinity
     private let treeQueue = DispatchQueue(label: "treeGen", qos: .userInitiated)
-    private var treePositions: [(x: Float, z: Float, r: Float)] = []
-    private var treeGrid: [Int64: [(x: Float, z: Float, r: Float)]] = [:]
+
+    // Tree collision data — includes destructible flag and node ref for saplings
+    private struct TreeEntry {
+        let x: Float; let z: Float; let r: Float
+        let destructible: Bool
+        weak var node: SCNNode?   // only set for destructible trees
+    }
+    private var treePositions: [TreeEntry] = []
+    private var treeGrid: [Int64: [TreeEntry]] = [:]
     private let treeGridCell: Float = 16
     private let speederRadius: Float = 0.55
+    var onSaplingSmashed: (() -> Void)?
     private var groundNode = SCNNode()
 
     // MARK: - Track
@@ -452,19 +464,28 @@ final class SpeedBikeScene: SCNScene {
 
     // MARK: - Tree geometries
     private func buildTreeGeoms() {
-        // Broadleaf trunks (0-2)
+        // Trunk colors for all 11 types
         let trunkCols: [(CGFloat,CGFloat,CGFloat)] = [
-            (0.30, 0.18, 0.09), (0.25, 0.15, 0.075), (0.20, 0.12, 0.06),
-            (0.28, 0.16, 0.08), (0.22, 0.13, 0.07), (0.35, 0.22, 0.12)
+            (0.30, 0.18, 0.09),  // 0: small broadleaf
+            (0.25, 0.15, 0.075), // 1: med broadleaf
+            (0.20, 0.12, 0.06),  // 2: large broadleaf
+            (0.28, 0.16, 0.08),  // 3: conifer 1
+            (0.22, 0.13, 0.07),  // 4: conifer 2
+            (0.35, 0.22, 0.12),  // 5: dead tree
+            (0.82, 0.78, 0.72),  // 6: birch (white bark)
+            (0.28, 0.17, 0.08),  // 7: willow
+            (0.32, 0.16, 0.06),  // 8: twisted oak
+            (0.34, 0.22, 0.10),  // 9: sapling (destructible)
+            (0.75, 0.72, 0.66),  // 10: young birch (destructible)
         ]
-        for i in 0..<6 {
+        for i in 0..<trunkCols.count {
             let h = treeHeights[i]
             let cyl = SCNCylinder(radius: CGFloat(trunkRadii[i]), height: CGFloat(h)); cyl.radialSegmentCount = 6; cyl.heightSegmentCount = 1
             let m = SCNMaterial(); m.diffuse.contents = UIColor(red: trunkCols[i].0, green: trunkCols[i].1, blue: trunkCols[i].2, alpha: 1)
             m.lightingModel = .lambert; cyl.firstMaterial = m; treeGeoms.append(cyl)
         }
 
-        // Canopies: 0-2 = round broadleaf, 3-4 = conical pines, 5 = dead (bare branches placeholder)
+        // Canopies: 0-2 = round broadleaf, 3-4 = conical pines, 5 = dead, 6 = birch, 7 = willow, 8 = twisted oak, 9-10 = saplings
         let broadCols: [(CGFloat,CGFloat,CGFloat)] = [(0.20,0.52,0.14),(0.16,0.44,0.10),(0.12,0.36,0.08)]
         for (i, cr) in broadCols.enumerated() {
             let s = SCNSphere(radius: CGFloat(canopyRadii[i])); s.segmentCount = 6
@@ -483,6 +504,25 @@ final class SpeedBikeScene: SCNScene {
         let deadMat = SCNMaterial(); deadMat.diffuse.contents = UIColor(red: 0.30, green: 0.20, blue: 0.12, alpha: 1); deadMat.lightingModel = .lambert
         let deadCanopy = SCNSphere(radius: 2.5); deadCanopy.segmentCount = 4; deadCanopy.firstMaterial = deadMat
         canopyGeoms.append(deadCanopy)
+        // Birch — light airy canopy, slightly yellow-green
+        let birchCanopyMat = SCNMaterial(); birchCanopyMat.diffuse.contents = UIColor(red: 0.32, green: 0.58, blue: 0.18, alpha: 1); birchCanopyMat.lightingModel = .lambert
+        let birchCanopy = SCNSphere(radius: CGFloat(canopyRadii[6])); birchCanopy.segmentCount = 6; birchCanopy.firstMaterial = birchCanopyMat
+        canopyGeoms.append(birchCanopy)
+        // Willow — wide droopy oval canopy
+        let willowMat = SCNMaterial(); willowMat.diffuse.contents = UIColor(red: 0.15, green: 0.42, blue: 0.12, alpha: 1); willowMat.lightingModel = .lambert
+        let willowCanopy = SCNSphere(radius: CGFloat(canopyRadii[7])); willowCanopy.segmentCount = 7; willowCanopy.firstMaterial = willowMat
+        canopyGeoms.append(willowCanopy)
+        // Twisted oak — irregular canopy
+        let oakMat = SCNMaterial(); oakMat.diffuse.contents = UIColor(red: 0.18, green: 0.40, blue: 0.10, alpha: 1); oakMat.lightingModel = .lambert
+        let oakCanopy = SCNSphere(radius: CGFloat(canopyRadii[8])); oakCanopy.segmentCount = 5; oakCanopy.firstMaterial = oakMat
+        canopyGeoms.append(oakCanopy)
+        // Sapling canopies — small light leafy tops
+        let sapMat1 = SCNMaterial(); sapMat1.diffuse.contents = UIColor(red: 0.28, green: 0.56, blue: 0.16, alpha: 1); sapMat1.lightingModel = .lambert
+        let sapCanopy1 = SCNSphere(radius: CGFloat(canopyRadii[9])); sapCanopy1.segmentCount = 5; sapCanopy1.firstMaterial = sapMat1
+        canopyGeoms.append(sapCanopy1)
+        let sapMat2 = SCNMaterial(); sapMat2.diffuse.contents = UIColor(red: 0.36, green: 0.60, blue: 0.22, alpha: 1); sapMat2.lightingModel = .lambert
+        let sapCanopy2 = SCNSphere(radius: CGFloat(canopyRadii[10])); sapCanopy2.segmentCount = 5; sapCanopy2.firstMaterial = sapMat2
+        canopyGeoms.append(sapCanopy2)
 
         // Bushes — flattened spheres, 4 sizes, dark undergrowth tones
         let bushCols: [(CGFloat,CGFloat,CGFloat)] = [(0.12,0.36,0.06),(0.10,0.30,0.05),(0.15,0.42,0.08),(0.08,0.24,0.04)]
@@ -518,7 +558,8 @@ final class SpeedBikeScene: SCNScene {
         let fGeos = fernGeoms
         let gtGeoCapture = giantTrunkGeo; let gcGeoCapture = giantCanopyGeo
         let heights = treeHeights; let cRadii = canopyRadii; let tRadii = trunkRadii; let bRadii = bushRadii
-        let treeTypeCount = min(geos.count, cGeos.count)
+        let solidTypeCount = 9  // types 0-8 are solid trees
+        let saplingTypes = [9, 10]  // destructible saplings
         let treeShadows = quality.treesCastShadows
         let jungleDepth = quality.jungleDepth; let jungleDens = quality.jungleDensity
         let bushesOn = quality.bushesEnabled; let bushScale = quality.bushDensityScale
@@ -530,7 +571,7 @@ final class SpeedBikeScene: SCNScene {
         treeQueue.async { [weak self] in
             guard let self = self else { return }
             let newRoot = SCNNode()
-            var positions = [(x: Float, z: Float, r: Float)]()
+            var positions = [TreeEntry]()
             func ch(_ iz: Int, _ ix: Int, _ si: Int) -> UInt64 {
                 var h = UInt64(bitPattern: Int64(iz &* 374761393 &+ ix &* 668265263 &+ si &* 1234567891))
                 h = (h ^ (h >> 30)) &* 0xbf58476d1ce4e5b9; h = (h ^ (h >> 27)) &* 0x94d049bb133111eb
@@ -552,31 +593,55 @@ final class SpeedBikeScene: SCNScene {
                         let jx = (cr(iz, ix, si, 0) - 0.5) * cellX * 0.7
                         let jz = (cr(iz, ix, si, 1) - 0.5) * cellZ * 0.7
                         if cr(iz, ix, si, 2) < d {
-                            let gRaw = Int(cr(iz, ix, si, 3) * Float(treeTypeCount - 1) + 0.5) % treeTypeCount
-                            let gIdx = fromEdge < 0.32 ? max(gRaw, 1) : gRaw
+                            // Decide: ~20% chance of sapling near track edge, solid tree otherwise
+                            let nearTrack = offX < clearHalf + 12
+                            let isSapling = nearTrack && cr(iz, ix, si, 5) < 0.22
+                            let gIdx: Int
+                            if isSapling {
+                                gIdx = saplingTypes[Int(cr(iz, ix, si, 6) * Float(saplingTypes.count - 1) + 0.5) % saplingTypes.count]
+                            } else {
+                                let gRaw = Int(cr(iz, ix, si, 3) * Float(solidTypeCount - 1) + 0.5) % solidTypeCount
+                                gIdx = fromEdge < 0.32 ? max(gRaw, 1) : gRaw
+                            }
                             let hScale = cr(iz, ix, si, 4) * 0.55 + 0.72
                             let h      = heights[gIdx] * hScale
                             let tx = tc + side * offX + jx; let tz = wz + jz
+
+                            // Parent node for destructible trees (so we can remove trunk+canopy together)
+                            let treeNode = isSapling ? SCNNode() : nil
+                            let parentNode = treeNode ?? newRoot
+
                             let trunk = SCNNode(geometry: geos[gIdx])
                             trunk.position = SCNVector3(tx, h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
                             if !treeShadows { trunk.castsShadow = false }
-                            newRoot.addChildNode(trunk)
+                            parentNode.addChildNode(trunk)
                             let canopy = SCNNode(geometry: cGeos[gIdx])
                             if gIdx >= 3 && gIdx <= 4 {
-                                // Conifers: canopy sits mid-trunk, cone shape
                                 canopy.position = SCNVector3(tx, h * 0.55, tz)
-                                canopy.scale = SCNVector3(1.0, 1.0, 1.0)
                             } else if gIdx == 5 {
-                                // Dead tree: small bare crown at top
                                 canopy.position = SCNVector3(tx, h * 0.85, tz)
                                 canopy.scale = SCNVector3(1.2, 0.6, 1.2)
+                            } else if gIdx == 7 {
+                                // Willow: wide droopy canopy
+                                canopy.position = SCNVector3(tx, h * 0.65, tz)
+                                canopy.scale = SCNVector3(1.4, 0.55, 1.4)
+                            } else if gIdx == 8 {
+                                // Twisted oak: irregular canopy, slight offset
+                                canopy.position = SCNVector3(tx + 1.0, h * 0.78, tz)
+                                canopy.scale = SCNVector3(1.1, 0.65, 0.9)
                             } else {
                                 canopy.position = SCNVector3(tx, h - cRadii[gIdx] * 0.1, tz)
                                 canopy.scale = SCNVector3(1.0, 0.72, 1.0)
                             }
                             if !treeShadows { canopy.castsShadow = false }
-                            newRoot.addChildNode(canopy)
-                            positions.append((x: tx, z: tz, r: tRadii[gIdx] * 1.2))
+                            parentNode.addChildNode(canopy)
+
+                            if let treeNode = treeNode {
+                                newRoot.addChildNode(treeNode)
+                                positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2, destructible: true, node: treeNode))
+                            } else {
+                                positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2, destructible: false, node: nil))
+                            }
                         }
                         offX += cellX; ix += 1
                     }
@@ -1062,36 +1127,77 @@ final class SpeedBikeScene: SCNScene {
         let cx = Int(floorf(worldX / treeGridCell))
         let cz = Int(floorf(worldZ / treeGridCell))
         var closestNearMiss: Float = Float.greatestFiniteMagnitude
+        var smashedKeys = [(gridKey: Int64, index: Int)]()
         for gx in (cx - 1)...(cx + 1) {
             for gz in (cz - 1)...(cz + 1) {
                 let key = Int64(Int32(gx)) << 32 | Int64(bitPattern: UInt64(UInt32(bitPattern: Int32(gz))))
                 guard let cell = treeGrid[key] else { continue }
-                for tree in cell {
+                for (idx, tree) in cell.enumerated() {
                     let dx = worldX - tree.x; let dz = worldZ - tree.z
                     let dist2 = dx*dx + dz*dz; let minD = tree.r + speederRadius
                     if dist2 < minD*minD && dist2 > 0.0001 {
-                        if forwardSpeed > 5 { triggerCrash(); return }
-                        let dist = sqrt(dist2)
-                        worldX += (dx/dist)*(minD-dist); worldZ += (dz/dist)*(minD-dist)
-                        forwardSpeed *= 0.88
+                        if tree.destructible {
+                            // Smash through sapling — slow down slightly, spawn splinter effect
+                            forwardSpeed *= 0.92
+                            spawnSaplingBreak(at: SCNVector3(tree.x, 5, tree.z))
+                            tree.node?.removeFromParentNode()
+                            smashedKeys.append((gridKey: key, index: idx))
+                            DispatchQueue.main.async { self.onSaplingSmashed?() }
+                        } else {
+                            if forwardSpeed > 5 { triggerCrash(); return }
+                            let dist = sqrt(dist2)
+                            worldX += (dx/dist)*(minD-dist); worldZ += (dz/dist)*(minD-dist)
+                            forwardSpeed *= 0.88
+                        }
                     } else {
                         // Near-miss detection
                         let nearDist = minD + nearMissThreshold
                         if dist2 < nearDist * nearDist && forwardSpeed > 15 {
                             let dist = sqrt(dist2)
-                            let gap = dist - minD  // how far from collision
+                            let gap = dist - minD
                             closestNearMiss = min(closestNearMiss, gap)
                         }
                     }
                 }
             }
         }
+        // Remove smashed saplings from grid (iterate in reverse to keep indices valid)
+        for smashed in smashedKeys.sorted(by: { $0.index > $1.index }) {
+            treeGrid[smashed.gridKey]?.remove(at: smashed.index)
+        }
         // Fire near-miss callback for the closest tree
         if closestNearMiss < nearMissThreshold && nearMissCooldown <= 0 {
             nearMissCooldown = 0.35
-            let closeness = 1.0 - (closestNearMiss / nearMissThreshold)  // 1 = almost hit, 0 = barely near
+            let closeness = 1.0 - (closestNearMiss / nearMissThreshold)
             DispatchQueue.main.async { self.onNearMiss?(closeness) }
         }
+    }
+
+    private func spawnSaplingBreak(at position: SCNVector3) {
+        // Wood splinter burst
+        let splinters = SCNParticleSystem()
+        splinters.birthRate = 120; splinters.emissionDuration = 0.08
+        splinters.particleLifeSpan = 0.6; splinters.particleLifeSpanVariation = 0.2
+        splinters.particleSize = 0.08; splinters.particleSizeVariation = 0.05
+        splinters.spreadingAngle = 140; splinters.particleVelocity = 12; splinters.particleVelocityVariation = 6
+        splinters.acceleration = SCNVector3(0, -14, 0)
+        splinters.particleColor = UIColor(red: 0.45, green: 0.30, blue: 0.12, alpha: 1)
+        splinters.particleColorVariation = SCNVector4(0.08, 0.06, 0.04, 0)
+        splinters.blendMode = .alpha; splinters.isLightingEnabled = true
+        // Leaf burst
+        let leaves = SCNParticleSystem()
+        leaves.birthRate = 60; leaves.emissionDuration = 0.10
+        leaves.particleLifeSpan = 1.0; leaves.particleLifeSpanVariation = 0.4
+        leaves.particleSize = 0.14; leaves.particleSizeVariation = 0.08
+        leaves.spreadingAngle = 160; leaves.particleVelocity = 8; leaves.particleVelocityVariation = 4
+        leaves.acceleration = SCNVector3(0, -6, 0)
+        leaves.particleColor = UIColor(red: 0.22, green: 0.48, blue: 0.12, alpha: 1)
+        leaves.particleColorVariation = SCNVector4(0.08, 0.12, 0.06, 0)
+        leaves.blendMode = .alpha; leaves.isLightingEnabled = true
+        let node = SCNNode(); node.position = position
+        rootNode.addChildNode(node)
+        node.addParticleSystem(splinters); node.addParticleSystem(leaves)
+        node.runAction(.sequence([.wait(duration: 2.0), .removeFromParentNode()]))
     }
 
     private func treeGridKey(_ x: Float, _ z: Float) -> Int64 {
@@ -1101,7 +1207,7 @@ final class SpeedBikeScene: SCNScene {
     }
 
     private func rebuildTreeGrid() {
-        var grid = [Int64: [(x: Float, z: Float, r: Float)]]()
+        var grid = [Int64: [TreeEntry]]()
         for t in treePositions {
             let key = treeGridKey(t.x, t.z)
             grid[key, default: []].append(t)
