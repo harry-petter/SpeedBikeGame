@@ -89,7 +89,17 @@ final class SpeedBikeScene: SCNScene {
     private let treeHeights:[Float] = [22, 42, 65, 35, 55, 18,  28, 30, 20,   10, 12]
     private let canopyRadii:[Float] = [5.5, 9.0, 14.0, 5.0, 7.0, 0,  4.5, 8.0, 6.0,  2.0, 2.5]
     private let trunkRadii: [Float] = [0.42, 0.80, 1.40, 0.40, 0.60, 0.55,  0.30, 0.50, 0.70,  0.15, 0.12]
-    private let saplingIndices: Set<Int> = [9, 10]  // these are destructible
+    // Per-type collision properties:
+    // crashSpeed = speed above which you explode (Float.infinity = never crash)
+    // smashPenalty = speed multiplier when smashing through (lower = bigger hit)
+    private let treeCrashSpeed: [Float] = [
+        //  0     1     2     3     4      5       6      7      8      9     10
+        .infinity, 65, 45, .infinity, 65, .infinity, .infinity, 70, 70, .infinity, .infinity
+    ]
+    private let treeSmashPenalty: [Float] = [
+        // 0    1     2     3     4     5     6     7     8     9     10
+        0.78, 0.60, 0.45, 0.78, 0.60, 0.75, 0.78, 0.65, 0.65, 0.92, 0.92
+    ]
     private var bushGeoms:    [SCNGeometry] = []
     private let bushRadii:    [Float] = [0.65, 1.05, 1.55, 0.45]
     private var fernGeoms:    [SCNGeometry] = []
@@ -99,17 +109,18 @@ final class SpeedBikeScene: SCNScene {
     private var lastTreeZ:  Float   = Float.infinity
     private let treeQueue = DispatchQueue(label: "treeGen", qos: .userInitiated)
 
-    // Tree collision data — includes destructible flag and node ref for saplings
+    // Tree collision data — crashSpeed threshold and penalty per tree
     private struct TreeEntry {
         let x: Float; let z: Float; let r: Float
-        let destructible: Bool
-        weak var node: SCNNode?   // only set for destructible trees
+        let crashSpeed: Float     // speed above which you explode (∞ = always smashable)
+        let smashPenalty: Float   // speed multiplier on smash-through
+        weak var node: SCNNode?   // node ref so we can remove on smash
     }
     private var treePositions: [TreeEntry] = []
     private var treeGrid: [Int64: [TreeEntry]] = [:]
     private let treeGridCell: Float = 16
     private let speederRadius: Float = 0.55
-    var onSaplingSmashed: (() -> Void)?
+    var onTreeSmashed: ((Float) -> Void)?  // intensity 0..1 (bigger tree = higher)
     private var groundNode = SCNNode()
 
     // MARK: - Track
@@ -558,6 +569,7 @@ final class SpeedBikeScene: SCNScene {
         let fGeos = fernGeoms
         let gtGeoCapture = giantTrunkGeo; let gcGeoCapture = giantCanopyGeo
         let heights = treeHeights; let cRadii = canopyRadii; let tRadii = trunkRadii; let bRadii = bushRadii
+        let crashSpeeds = treeCrashSpeed; let smashPenalties = treeSmashPenalty
         let solidTypeCount = 9  // types 0-8 are solid trees
         let saplingTypes = [9, 10]  // destructible saplings
         let treeShadows = quality.treesCastShadows
@@ -593,7 +605,7 @@ final class SpeedBikeScene: SCNScene {
                         let jx = (cr(iz, ix, si, 0) - 0.5) * cellX * 0.7
                         let jz = (cr(iz, ix, si, 1) - 0.5) * cellZ * 0.7
                         if cr(iz, ix, si, 2) < d {
-                            // Decide: ~20% chance of sapling near track edge, solid tree otherwise
+                            // ~20% chance of sapling near track edge, solid tree otherwise
                             let nearTrack = offX < clearHalf + 12
                             let isSapling = nearTrack && cr(iz, ix, si, 5) < 0.22
                             let gIdx: Int
@@ -607,14 +619,13 @@ final class SpeedBikeScene: SCNScene {
                             let h      = heights[gIdx] * hScale
                             let tx = tc + side * offX + jx; let tz = wz + jz
 
-                            // Parent node for destructible trees (so we can remove trunk+canopy together)
-                            let treeNode = isSapling ? SCNNode() : nil
-                            let parentNode = treeNode ?? newRoot
+                            // All trees get a parent node so any can be removed on smash
+                            let treeNode = SCNNode()
 
                             let trunk = SCNNode(geometry: geos[gIdx])
                             trunk.position = SCNVector3(tx, h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
                             if !treeShadows { trunk.castsShadow = false }
-                            parentNode.addChildNode(trunk)
+                            treeNode.addChildNode(trunk)
                             let canopy = SCNNode(geometry: cGeos[gIdx])
                             if gIdx >= 3 && gIdx <= 4 {
                                 canopy.position = SCNVector3(tx, h * 0.55, tz)
@@ -634,14 +645,14 @@ final class SpeedBikeScene: SCNScene {
                                 canopy.scale = SCNVector3(1.0, 0.72, 1.0)
                             }
                             if !treeShadows { canopy.castsShadow = false }
-                            parentNode.addChildNode(canopy)
+                            treeNode.addChildNode(canopy)
+                            newRoot.addChildNode(treeNode)
 
-                            if let treeNode = treeNode {
-                                newRoot.addChildNode(treeNode)
-                                positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2, destructible: true, node: treeNode))
-                            } else {
-                                positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2, destructible: false, node: nil))
-                            }
+                            positions.append(TreeEntry(
+                                x: tx, z: tz, r: tRadii[gIdx] * 1.2,
+                                crashSpeed: crashSpeeds[gIdx],
+                                smashPenalty: smashPenalties[gIdx],
+                                node: treeNode))
                         }
                         offX += cellX; ix += 1
                     }
@@ -737,6 +748,9 @@ final class SpeedBikeScene: SCNScene {
                             canopy.position = SCNVector3(gx, 85 * hScale - 8, gzz)
                             canopy.scale = SCNVector3(1.1, 0.60, 1.1); canopy.castsShadow = false
                             newRoot.addChildNode(canopy)
+                            // Giants always crash — crashSpeed 0 means any contact kills
+                            positions.append(TreeEntry(x: gx, z: gzz, r: 3.5 * 1.2,
+                                                       crashSpeed: 0, smashPenalty: 0, node: nil))
                         }
                     }
                     gz += 300
@@ -774,62 +788,131 @@ final class SpeedBikeScene: SCNScene {
             m.isDoubleSided = true; return m
         }
 
-        // Fuselage
-        let hull = SCNBox(width: 0.30, height: 0.16, length: 5.6, chamferRadius: 0.05); hull.firstMaterial = pbr(0.14, 0.14, 0.16, metal: 0.4, rough: 0.35)
+        // ── Main fuselage ──
+        let hull = SCNBox(width: 0.32, height: 0.18, length: 5.8, chamferRadius: 0.06); hull.firstMaterial = pbr(0.12, 0.12, 0.15, metal: 0.5, rough: 0.30)
         speederBody.addChildNode(SCNNode(geometry: hull))
-        let fairing = SCNBox(width: 0.22, height: 0.10, length: 3.8, chamferRadius: 0.04); fairing.firstMaterial = pbr(0.52, 0.50, 0.48, metal: 0.6, rough: 0.25)
-        let fn = SCNNode(geometry: fairing); fn.position = SCNVector3(0, 0.13, -0.4); speederBody.addChildNode(fn)
-        let belly = SCNBox(width: 0.36, height: 0.07, length: 4.8, chamferRadius: 0.03); belly.firstMaterial = pbr(0.22, 0.22, 0.24, metal: 0.5, rough: 0.40)
-        let beln = SCNNode(geometry: belly); beln.position = SCNVector3(0, -0.10, 0); speederBody.addChildNode(beln)
-        // Nose (compact — no long spike)
-        let noseCone = SCNBox(width: 0.16, height: 0.11, length: 0.72, chamferRadius: 0.04); noseCone.firstMaterial = pbr(0.46, 0.44, 0.42, metal: 0.7, rough: 0.20)
-        let nn = SCNNode(geometry: noseCone); nn.position = SCNVector3(0, 0.02, -3.18); speederBody.addChildNode(nn)
-        let noseCap = SCNSphere(radius: 0.09); noseCap.segmentCount = 8; noseCap.firstMaterial = pbr(0.52, 0.50, 0.48, metal: 0.8, rough: 0.18)
-        speederBody.addChildNode(SCNNode(geometry: noseCap) ※ { $0.position = SCNVector3(0, 0.02, -3.56) })
-        // Cockpit
-        let cpBody = SCNBox(width: 0.24, height: 0.14, length: 1.10, chamferRadius: 0.05); cpBody.firstMaterial = pbr(0.42, 0.40, 0.38, metal: 0.5, rough: 0.30)
-        speederBody.addChildNode(SCNNode(geometry: cpBody) ※ { $0.position = SCNVector3(0, 0.18, -1.1) })
-        let shield = SCNBox(width: 0.20, height: 0.12, length: 0.55, chamferRadius: 0.04); shield.firstMaterial = glass()
-        speederBody.addChildNode(SCNNode(geometry: shield) ※ { $0.position = SCNVector3(0, 0.25, -1.55); $0.eulerAngles.x = -0.22 })
-        let bar = SCNCapsule(capRadius: 0.028, height: 0.72); bar.firstMaterial = pbr(0.30, 0.30, 0.32, metal: 0.8, rough: 0.18)
-        speederBody.addChildNode(SCNNode(geometry: bar) ※ { $0.eulerAngles.z = .pi/2; $0.position = SCNVector3(0, 0.21, -1.82) })
-        // Engine pods
+        // Upper fairing with accent color
+        let fairing = SCNBox(width: 0.24, height: 0.08, length: 4.0, chamferRadius: 0.04); fairing.firstMaterial = pbr(0.55, 0.52, 0.48, metal: 0.65, rough: 0.22)
+        speederBody.addChildNode(SCNNode(geometry: fairing) ※ { $0.position = SCNVector3(0, 0.13, -0.3) })
+        // Armored belly plate
+        let belly = SCNBox(width: 0.40, height: 0.06, length: 5.0, chamferRadius: 0.03); belly.firstMaterial = pbr(0.20, 0.20, 0.23, metal: 0.55, rough: 0.38)
+        speederBody.addChildNode(SCNNode(geometry: belly) ※ { $0.position = SCNVector3(0, -0.12, 0) })
+        // Side armor panels
         for side: Float in [-1, 1] {
-            let pod = SCNCylinder(radius: 0.18, height: 5.20); pod.radialSegmentCount = 10; pod.firstMaterial = pbr(0.18, 0.18, 0.20, metal: 0.6, rough: 0.28)
-            speederBody.addChildNode(SCNNode(geometry: pod) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side * 0.42, -0.14, 0.28) })
-            // Intake rings (3 per pod)
-            for i in 0..<3 {
-                let ring = SCNTorus(ringRadius: 0.22, pipeRadius: 0.028); ring.ringSegmentCount = 14; ring.pipeSegmentCount = 5
-                ring.firstMaterial = pbr(0.40, 0.40, 0.42, metal: 0.8, rough: 0.18)
-                speederBody.addChildNode(SCNNode(geometry: ring) ※ { $0.position = SCNVector3(side * 0.42, -0.14, -0.55 + Float(i)*0.28) })
-            }
-            let bell = SCNCone(topRadius: 0.12, bottomRadius: 0.22, height: 0.30); bell.radialSegmentCount = 10; bell.firstMaterial = glow(1.0, 0.38, 0.06)
-            speederBody.addChildNode(SCNNode(geometry: bell) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side*0.42, -0.14, 3.0) })
-            let trail = SCNCylinder(radius: 0.10, height: 0.40); trail.radialSegmentCount = 8; trail.firstMaterial = glow(1.0, 0.24, 0.04, s: 1.4)
-            speederBody.addChildNode(SCNNode(geometry: trail) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side*0.42, -0.14, 3.38) })
-            let pylon = SCNBox(width: 0.16, height: 0.06, length: 1.10, chamferRadius: 0.02); pylon.firstMaterial = pbr(0.28, 0.28, 0.30, metal: 0.5, rough: 0.38)
-            speederBody.addChildNode(SCNNode(geometry: pylon) ※ { $0.position = SCNVector3(side*0.22, -0.10, 0.28) })
-            for fi in 0..<3 {
-                let fin = SCNBox(width: 0.02, height: 0.22, length: 0.58, chamferRadius: 0.005); fin.firstMaterial = pbr(0.32, 0.32, 0.34, metal: 0.7, rough: 0.22)
-                speederBody.addChildNode(SCNNode(geometry: fin) ※ { $0.position = SCNVector3(side*0.42, 0.08, -0.78 + Float(fi)*0.52) })
-            }
-            let stripe = SCNBox(width: 0.04, height: 0.04, length: 2.80, chamferRadius: 0.01); stripe.firstMaterial = glow(0.12, 0.70, 1.0, s: 0.55)
-            speederBody.addChildNode(SCNNode(geometry: stripe) ※ { $0.position = SCNVector3(side*0.16, 0.08, -0.20) })
+            let panel = SCNBox(width: 0.03, height: 0.14, length: 3.2, chamferRadius: 0.01); panel.firstMaterial = pbr(0.16, 0.16, 0.19, metal: 0.6, rough: 0.28)
+            speederBody.addChildNode(SCNNode(geometry: panel) ※ { $0.position = SCNVector3(side * 0.17, 0.02, -0.2) })
         }
-        // Repulsor pads
-        for (pz, pr): (Float, Float) in [(-1.8, 0.24), (0.2, 0.20), (2.0, 0.18)] {
-            let pad = SCNCylinder(radius: CGFloat(pr), height: 0.04); pad.radialSegmentCount = 12; pad.firstMaterial = glow(0.12, 0.62, 1.0, s: 1.2)
-            speederBody.addChildNode(SCNNode(geometry: pad) ※ { $0.position = SCNVector3(0, -0.24, pz) })
-            let ring = SCNTorus(ringRadius: CGFloat(pr*1.5), pipeRadius: 0.016); ring.ringSegmentCount = 12; ring.pipeSegmentCount = 5; ring.firstMaterial = glow(0.08, 0.40, 0.90, s: 0.45)
-            speederBody.addChildNode(SCNNode(geometry: ring) ※ { $0.position = SCNVector3(0, -0.22, pz) })
+
+        // ── Nose section ──
+        let noseCone = SCNBox(width: 0.18, height: 0.12, length: 0.80, chamferRadius: 0.05); noseCone.firstMaterial = pbr(0.48, 0.46, 0.43, metal: 0.7, rough: 0.18)
+        speederBody.addChildNode(SCNNode(geometry: noseCone) ※ { $0.position = SCNVector3(0, 0.02, -3.28) })
+        let noseCap = SCNSphere(radius: 0.10); noseCap.segmentCount = 8; noseCap.firstMaterial = pbr(0.55, 0.52, 0.50, metal: 0.85, rough: 0.12)
+        speederBody.addChildNode(SCNNode(geometry: noseCap) ※ { $0.position = SCNVector3(0, 0.02, -3.70) })
+        // Nose sensor array
+        let sensor = SCNCylinder(radius: 0.025, height: 0.30); sensor.radialSegmentCount = 6; sensor.firstMaterial = pbr(0.35, 0.35, 0.38, metal: 0.8, rough: 0.15)
+        speederBody.addChildNode(SCNNode(geometry: sensor) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(0, 0.06, -3.80) })
+        let sensorTip = SCNSphere(radius: 0.03); sensorTip.segmentCount = 6; sensorTip.firstMaterial = glow(1.0, 0.20, 0.05)
+        speederBody.addChildNode(SCNNode(geometry: sensorTip) ※ { $0.position = SCNVector3(0, 0.06, -3.95) })
+        // Headlights
+        for side: Float in [-1, 1] {
+            let light = SCNCylinder(radius: 0.035, height: 0.03); light.radialSegmentCount = 8; light.firstMaterial = glow(0.90, 0.95, 1.0, s: 1.5)
+            speederBody.addChildNode(SCNNode(geometry: light) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side * 0.08, 0.02, -3.60) })
         }
-        // Control vanes
+
+        // ── Cockpit ──
+        let cpBody = SCNBox(width: 0.26, height: 0.15, length: 1.20, chamferRadius: 0.05); cpBody.firstMaterial = pbr(0.40, 0.38, 0.36, metal: 0.55, rough: 0.28)
+        speederBody.addChildNode(SCNNode(geometry: cpBody) ※ { $0.position = SCNVector3(0, 0.19, -1.1) })
+        let shield = SCNBox(width: 0.22, height: 0.14, length: 0.60, chamferRadius: 0.04); shield.firstMaterial = glass()
+        speederBody.addChildNode(SCNNode(geometry: shield) ※ { $0.position = SCNVector3(0, 0.27, -1.55); $0.eulerAngles.x = -0.22 })
+        // Handlebars
+        let bar = SCNCapsule(capRadius: 0.030, height: 0.78); bar.firstMaterial = pbr(0.28, 0.28, 0.30, metal: 0.8, rough: 0.15)
+        speederBody.addChildNode(SCNNode(geometry: bar) ※ { $0.eulerAngles.z = .pi/2; $0.position = SCNVector3(0, 0.22, -1.85) })
+        // Handlebar grips
+        for side: Float in [-1, 1] {
+            let grip = SCNCylinder(radius: 0.038, height: 0.10); grip.radialSegmentCount = 8; grip.firstMaterial = pbr(0.08, 0.08, 0.08, metal: 0.1, rough: 0.8)
+            speederBody.addChildNode(SCNNode(geometry: grip) ※ { $0.eulerAngles.z = .pi/2; $0.position = SCNVector3(side * 0.42, 0.22, -1.85) })
+        }
+        // Instrument cluster — small glowing panel behind windshield
+        let instrument = SCNBox(width: 0.14, height: 0.02, length: 0.10, chamferRadius: 0.005); instrument.firstMaterial = glow(0.10, 0.80, 0.50, s: 0.6)
+        speederBody.addChildNode(SCNNode(geometry: instrument) ※ { $0.position = SCNVector3(0, 0.22, -1.40) })
+        // Side console boxes
+        for side: Float in [-1, 1] {
+            let console = SCNBox(width: 0.06, height: 0.05, length: 0.30, chamferRadius: 0.01); console.firstMaterial = pbr(0.22, 0.22, 0.25, metal: 0.5, rough: 0.35)
+            speederBody.addChildNode(SCNNode(geometry: console) ※ { $0.position = SCNVector3(side * 0.14, 0.15, -0.6) })
+        }
+
+        // ── Engine pods (larger, more detailed) ──
+        for side: Float in [-1, 1] {
+            // Main turbine nacelle
+            let pod = SCNCylinder(radius: 0.20, height: 5.40); pod.radialSegmentCount = 12; pod.firstMaterial = pbr(0.16, 0.16, 0.19, metal: 0.65, rough: 0.25)
+            speederBody.addChildNode(SCNNode(geometry: pod) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side * 0.46, -0.14, 0.20) })
+            // Engine cowling — wider section at front
+            let cowl = SCNCone(topRadius: 0.16, bottomRadius: 0.24, height: 0.50); cowl.radialSegmentCount = 12; cowl.firstMaterial = pbr(0.20, 0.20, 0.22, metal: 0.7, rough: 0.22)
+            speederBody.addChildNode(SCNNode(geometry: cowl) ※ { $0.eulerAngles.x = -.pi/2; $0.position = SCNVector3(side * 0.46, -0.14, -2.30) })
+            // Intake rings (4 per pod)
+            for i in 0..<4 {
+                let ring = SCNTorus(ringRadius: 0.24, pipeRadius: 0.022); ring.ringSegmentCount = 16; ring.pipeSegmentCount = 5
+                ring.firstMaterial = pbr(0.42, 0.42, 0.44, metal: 0.85, rough: 0.15)
+                speederBody.addChildNode(SCNNode(geometry: ring) ※ { $0.position = SCNVector3(side * 0.46, -0.14, -0.80 + Float(i)*0.35) })
+            }
+            // Exhaust bell
+            let bell = SCNCone(topRadius: 0.14, bottomRadius: 0.24, height: 0.35); bell.radialSegmentCount = 12; bell.firstMaterial = glow(1.0, 0.38, 0.06)
+            speederBody.addChildNode(SCNNode(geometry: bell) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side*0.46, -0.14, 3.10) })
+            // Exhaust core glow
+            let exhaust = SCNCylinder(radius: 0.12, height: 0.50); exhaust.radialSegmentCount = 10; exhaust.firstMaterial = glow(1.0, 0.22, 0.03, s: 1.6)
+            speederBody.addChildNode(SCNNode(geometry: exhaust) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side*0.46, -0.14, 3.45) })
+            // Pylon connecting pod to fuselage
+            let pylon = SCNBox(width: 0.18, height: 0.07, length: 1.30, chamferRadius: 0.02); pylon.firstMaterial = pbr(0.26, 0.26, 0.28, metal: 0.55, rough: 0.35)
+            speederBody.addChildNode(SCNNode(geometry: pylon) ※ { $0.position = SCNVector3(side*0.24, -0.10, 0.20) })
+            // Rear pylon strut
+            let rearPylon = SCNBox(width: 0.10, height: 0.05, length: 0.80, chamferRadius: 0.01); rearPylon.firstMaterial = pbr(0.24, 0.24, 0.26, metal: 0.5, rough: 0.38)
+            speederBody.addChildNode(SCNNode(geometry: rearPylon) ※ { $0.position = SCNVector3(side*0.24, -0.08, 2.0) })
+            // Cooling fins (4 per side)
+            for fi in 0..<4 {
+                let fin = SCNBox(width: 0.02, height: 0.24, length: 0.50, chamferRadius: 0.005); fin.firstMaterial = pbr(0.30, 0.30, 0.32, metal: 0.7, rough: 0.22)
+                speederBody.addChildNode(SCNNode(geometry: fin) ※ { $0.position = SCNVector3(side*0.46, 0.08, -0.90 + Float(fi)*0.48) })
+            }
+            // Running light stripe
+            let stripe = SCNBox(width: 0.03, height: 0.03, length: 3.20, chamferRadius: 0.008); stripe.firstMaterial = glow(0.12, 0.70, 1.0, s: 0.55)
+            speederBody.addChildNode(SCNNode(geometry: stripe) ※ { $0.position = SCNVector3(side*0.18, 0.09, -0.10) })
+            // Engine detail greebles — small boxes on nacelle
+            for gz in stride(from: Float(-1.0), through: 1.5, by: 0.80) {
+                let greeble = SCNBox(width: 0.06, height: 0.06, length: 0.12, chamferRadius: 0.005); greeble.firstMaterial = pbr(0.25, 0.25, 0.28, metal: 0.6, rough: 0.30)
+                speederBody.addChildNode(SCNNode(geometry: greeble) ※ { $0.position = SCNVector3(side*0.46 + side*0.20, -0.14, gz) })
+            }
+            // Rear tail light
+            let tailLight = SCNCylinder(radius: 0.04, height: 0.02); tailLight.radialSegmentCount = 8; tailLight.firstMaterial = glow(1.0, 0.10, 0.05, s: 1.2)
+            speederBody.addChildNode(SCNNode(geometry: tailLight) ※ { $0.eulerAngles.x = .pi/2; $0.position = SCNVector3(side*0.46, -0.06, 3.55) })
+        }
+
+        // ── Repulsor pads (with wider hover rings) ──
+        for (pz, pr): (Float, Float) in [(-1.8, 0.26), (0.0, 0.22), (2.0, 0.20)] {
+            let pad = SCNCylinder(radius: CGFloat(pr), height: 0.04); pad.radialSegmentCount = 14; pad.firstMaterial = glow(0.12, 0.62, 1.0, s: 1.3)
+            speederBody.addChildNode(SCNNode(geometry: pad) ※ { $0.position = SCNVector3(0, -0.26, pz) })
+            let ring = SCNTorus(ringRadius: CGFloat(pr*1.6), pipeRadius: 0.018); ring.ringSegmentCount = 14; ring.pipeSegmentCount = 5; ring.firstMaterial = glow(0.08, 0.40, 0.90, s: 0.50)
+            speederBody.addChildNode(SCNNode(geometry: ring) ※ { $0.position = SCNVector3(0, -0.24, pz) })
+            // Inner glow disc
+            let disc = SCNCylinder(radius: CGFloat(pr * 0.6), height: 0.01); disc.radialSegmentCount = 10; disc.firstMaterial = glow(0.08, 0.50, 1.0, s: 0.8)
+            speederBody.addChildNode(SCNNode(geometry: disc) ※ { $0.position = SCNVector3(0, -0.28, pz) })
+        }
+
+        // ── Rear section ──
+        // Control vanes (X-pattern)
         for angle: Float in [0.52, -0.52, .pi/2+0.52, .pi/2-0.52] {
-            let vane = SCNBox(width: 0.38, height: 0.04, length: 0.56, chamferRadius: 0.01); vane.firstMaterial = pbr(0.36, 0.34, 0.32, metal: 0.6, rough: 0.30)
-            speederBody.addChildNode(SCNNode(geometry: vane) ※ { $0.position = SCNVector3(0, -0.06, 2.55); $0.eulerAngles.z = angle })
+            let vane = SCNBox(width: 0.42, height: 0.04, length: 0.60, chamferRadius: 0.01); vane.firstMaterial = pbr(0.34, 0.32, 0.30, metal: 0.6, rough: 0.28)
+            speederBody.addChildNode(SCNNode(geometry: vane) ※ { $0.position = SCNVector3(0, -0.06, 2.60); $0.eulerAngles.z = angle })
         }
-        let tailFin = SCNBox(width: 0.04, height: 0.36, length: 0.66, chamferRadius: 0.015); tailFin.firstMaterial = pbr(0.38, 0.36, 0.34, metal: 0.55, rough: 0.32)
-        speederBody.addChildNode(SCNNode(geometry: tailFin) ※ { $0.position = SCNVector3(0, 0.24, 2.50) })
+        // Tall tail fin
+        let tailFin = SCNBox(width: 0.04, height: 0.40, length: 0.72, chamferRadius: 0.015); tailFin.firstMaterial = pbr(0.36, 0.34, 0.32, metal: 0.55, rough: 0.30)
+        speederBody.addChildNode(SCNNode(geometry: tailFin) ※ { $0.position = SCNVector3(0, 0.26, 2.55) })
+        // Tail fin tip light
+        let finLight = SCNSphere(radius: 0.02); finLight.segmentCount = 6; finLight.firstMaterial = glow(1.0, 0.15, 0.05, s: 1.0)
+        speederBody.addChildNode(SCNNode(geometry: finLight) ※ { $0.position = SCNVector3(0, 0.48, 2.55) })
+        // Antenna mast
+        let antenna = SCNCylinder(radius: 0.012, height: 0.28); antenna.radialSegmentCount = 5; antenna.firstMaterial = pbr(0.40, 0.40, 0.42, metal: 0.8, rough: 0.15)
+        speederBody.addChildNode(SCNNode(geometry: antenna) ※ { $0.position = SCNVector3(0, 0.38, -0.5) })
+        let antennaTip = SCNSphere(radius: 0.018); antennaTip.segmentCount = 5; antennaTip.firstMaterial = glow(0.10, 1.0, 0.30, s: 0.7)
+        speederBody.addChildNode(SCNNode(geometry: antennaTip) ※ { $0.position = SCNVector3(0, 0.53, -0.5) })
 
         // Flatten speeder body to reduce draw calls (~40 → few)
         let flatBody = speederBody.flattenedClone()
@@ -989,7 +1072,7 @@ final class SpeedBikeScene: SCNScene {
         // Speeder nodes
         speederPivot.position    = SCNVector3(worldX, speederY, worldZ)
         speederPivot.eulerAngles = SCNVector3(0, heading, 0)
-        bankAngle  += (-(turnRate / maxTurnRate) * 0.72 - bankAngle)  * min(1, dt * 5.5)
+        bankAngle  += (-(turnRate / maxTurnRate) * 1.05 - bankAngle)  * min(1, dt * 5.5)
         pitchAngle += (-velocityY * 0.022 - pitchAngle) * min(1, dt * 6)
         speederBody.eulerAngles = SCNVector3(pitchAngle, 0, bankAngle)
 
@@ -1017,7 +1100,7 @@ final class SpeedBikeScene: SCNScene {
         let lookDist: Float = 10 + Float(speedRatio) * 18
         cameraNode.look(at: SCNVector3(worldX + sin(heading)*lookDist, speederY - 0.30, worldZ + cos(heading)*lookDist),
                         up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
-        let bankTarget = (turnRate / maxTurnRate) * 0.52 + trackBankAngle(worldZ) * 0.70
+        let bankTarget = (turnRate / maxTurnRate) * 0.82 + trackBankAngle(worldZ) * 0.85
         camBankAngle += (bankTarget - camBankAngle) * min(1, dt * 7)
         cameraNode.simdOrientation = simd_mul(cameraNode.simdOrientation,
                                               simd_quatf(angle: camBankAngle, axis: SIMD3<Float>(0, 0, 1)))
@@ -1136,18 +1219,23 @@ final class SpeedBikeScene: SCNScene {
                     let dx = worldX - tree.x; let dz = worldZ - tree.z
                     let dist2 = dx*dx + dz*dz; let minD = tree.r + speederRadius
                     if dist2 < minD*minD && dist2 > 0.0001 {
-                        if tree.destructible {
-                            // Smash through sapling — slow down slightly, spawn splinter effect
-                            forwardSpeed *= 0.92
-                            spawnSaplingBreak(at: SCNVector3(tree.x, 5, tree.z))
-                            tree.node?.removeFromParentNode()
-                            smashedKeys.append((gridKey: key, index: idx))
-                            DispatchQueue.main.async { self.onSaplingSmashed?() }
-                        } else {
-                            if forwardSpeed > 5 { triggerCrash(); return }
+                        if forwardSpeed >= tree.crashSpeed {
+                            // Too fast for this tree — crash
+                            triggerCrash(); return
+                        }
+                        if forwardSpeed < 8 {
+                            // Too slow to smash — just bump and stop
                             let dist = sqrt(dist2)
                             worldX += (dx/dist)*(minD-dist); worldZ += (dz/dist)*(minD-dist)
-                            forwardSpeed *= 0.88
+                            forwardSpeed *= 0.5
+                        } else {
+                            // Smash through — apply speed penalty, remove tree
+                            forwardSpeed *= tree.smashPenalty
+                            let breakHeight = treeHeights[min(treeHeights.count - 1, Int(tree.r / 0.2))]
+                            spawnTreeSmash(at: SCNVector3(tree.x, breakHeight * 0.3, tree.z), intensity: 1.0 - tree.smashPenalty)
+                            tree.node?.removeFromParentNode()
+                            smashedKeys.append((gridKey: key, index: idx))
+                            DispatchQueue.main.async { self.onTreeSmashed?(1.0 - tree.smashPenalty) }
                         }
                     } else {
                         // Near-miss detection
@@ -1161,7 +1249,7 @@ final class SpeedBikeScene: SCNScene {
                 }
             }
         }
-        // Remove smashed saplings from grid (iterate in reverse to keep indices valid)
+        // Remove smashed trees from grid (iterate in reverse to keep indices valid)
         for smashed in smashedKeys.sorted(by: { $0.index > $1.index }) {
             treeGrid[smashed.gridKey]?.remove(at: smashed.index)
         }
@@ -1173,28 +1261,30 @@ final class SpeedBikeScene: SCNScene {
         }
     }
 
-    private func spawnSaplingBreak(at position: SCNVector3) {
+    /// Spawn wood splinters + leaves scaled by impact intensity (0 = tiny sapling, 1 = large tree)
+    private func spawnTreeSmash(at position: SCNVector3, intensity: Float) {
+        let scale = 0.4 + intensity * 0.6  // 0.4..1.0
         // Wood splinter burst
         let splinters = SCNParticleSystem()
-        splinters.birthRate = 120; splinters.emissionDuration = 0.08
-        splinters.particleLifeSpan = 0.6; splinters.particleLifeSpanVariation = 0.2
-        splinters.particleSize = 0.08; splinters.particleSizeVariation = 0.05
-        splinters.spreadingAngle = 140; splinters.particleVelocity = 12; splinters.particleVelocityVariation = 6
+        splinters.birthRate = CGFloat(80 + intensity * 250); splinters.emissionDuration = 0.10
+        splinters.particleLifeSpan = CGFloat(0.5 + intensity * 0.5); splinters.particleLifeSpanVariation = 0.2
+        splinters.particleSize = CGFloat(0.06 + intensity * 0.10); splinters.particleSizeVariation = 0.05
+        splinters.spreadingAngle = 140; splinters.particleVelocity = CGFloat(8 + intensity * 14); splinters.particleVelocityVariation = 6
         splinters.acceleration = SCNVector3(0, -14, 0)
         splinters.particleColor = UIColor(red: 0.45, green: 0.30, blue: 0.12, alpha: 1)
         splinters.particleColorVariation = SCNVector4(0.08, 0.06, 0.04, 0)
         splinters.blendMode = .alpha; splinters.isLightingEnabled = true
         // Leaf burst
         let leaves = SCNParticleSystem()
-        leaves.birthRate = 60; leaves.emissionDuration = 0.10
-        leaves.particleLifeSpan = 1.0; leaves.particleLifeSpanVariation = 0.4
-        leaves.particleSize = 0.14; leaves.particleSizeVariation = 0.08
-        leaves.spreadingAngle = 160; leaves.particleVelocity = 8; leaves.particleVelocityVariation = 4
+        leaves.birthRate = CGFloat(40 + intensity * 120); leaves.emissionDuration = 0.12
+        leaves.particleLifeSpan = CGFloat(0.8 + intensity * 0.6); leaves.particleLifeSpanVariation = 0.4
+        leaves.particleSize = CGFloat(0.10 + intensity * 0.10); leaves.particleSizeVariation = 0.08
+        leaves.spreadingAngle = 160; leaves.particleVelocity = CGFloat(6 + intensity * 10); leaves.particleVelocityVariation = 4
         leaves.acceleration = SCNVector3(0, -6, 0)
         leaves.particleColor = UIColor(red: 0.22, green: 0.48, blue: 0.12, alpha: 1)
         leaves.particleColorVariation = SCNVector4(0.08, 0.12, 0.06, 0)
         leaves.blendMode = .alpha; leaves.isLightingEnabled = true
-        let node = SCNNode(); node.position = position
+        let node = SCNNode(); node.position = SCNVector3(position.x, position.y * scale, position.z)
         rootNode.addChildNode(node)
         node.addParticleSystem(splinters); node.addParticleSystem(leaves)
         node.runAction(.sequence([.wait(duration: 2.0), .removeFromParentNode()]))

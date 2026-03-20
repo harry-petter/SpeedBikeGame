@@ -195,8 +195,10 @@ final class GameViewController: UIViewController {
         gameScene.onCheckpoint = { [weak self] index, time in
             self?.showSplit(index: index, time: time)
         }
-        gameScene.onSaplingSmashed = { [weak self] in
-            self?.playHaptic(intensity: 0.5, sharpness: 0.7)
+        gameScene.onTreeSmashed = { [weak self] intensity in
+            // Bigger trees = stronger haptic + camera shake
+            self?.playHaptic(intensity: 0.3 + intensity * 0.6, sharpness: 0.5 + intensity * 0.4)
+            if intensity > 0.3 { self?.doSmashShake(intensity: intensity) }
         }
         // Load best splits
         if let data = UserDefaults.standard.array(forKey: splitKey()) as? [Float] {
@@ -266,41 +268,63 @@ final class GameViewController: UIViewController {
         let sampleRate   = outputFormat.sampleRate
         let format       = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         let state        = audioState
-        // Phase is tracked in CYCLES [0,1) to avoid discontinuity on wrap.
-        // Idle hz ~55 Hz (above sub-bass); max hz ~125 Hz — clean engine tone range.
+        // Sci-fi hover engine — dual detuned oscillators + sub-bass throb + pulse modulation
         let srcNode = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList -> OSStatus in
-            let spd  = Double(state.speed)
-            let hz   = (55.0 + spd * 70.0) * (1.0 + state.boostPitchOffset)
-            let pdt  = hz / sampleRate
-            let vol  = 0.18 + spd * 0.38
+            let spd: Double  = Double(state.speed)
+            let boost: Double = state.boostPitchOffset
+            let baseHz: Double = (48.0 + spd * 65.0) * (1.0 + boost)
+            let pdt1: Double = baseHz / sampleRate
+            let pdt2: Double = (baseHz * 1.007) / sampleRate
+            let subHz: Double = (22.0 + spd * 18.0) / sampleRate
+            let vol: Double  = 0.14 + spd * 0.32
+            let pulseRate: Double = 3.5 + spd * 8.0
             let ablPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
             for frame in 0..<Int(frameCount) {
-                state.phase += pdt
-                if state.phase >= 1.0 { state.phase -= 1.0 }
-                let p = state.phase * 2 * Double.pi
-                var s = sin(p) * 0.42             // fundamental
-                s += sin(p * 2) * 0.22            // 2nd harmonic
-                s += sin(p * 3) * 0.10            // 3rd harmonic
-                s += sin(p * 4) * 0.05            // 4th harmonic
-                s *= vol
+                state.phase += pdt1; if state.phase >= 1.0 { state.phase -= 1.0 }
+                state.phase2 += pdt2; if state.phase2 >= 1.0 { state.phase2 -= 1.0 }
+                state.subPhase += subHz; if state.subPhase >= 1.0 { state.subPhase -= 1.0 }
+                let p1: Double = state.phase * 2.0 * Double.pi
+                let p2: Double = state.phase2 * 2.0 * Double.pi
+                let ps: Double = state.subPhase * 2.0 * Double.pi
+                // Osc 1: saw-ish
+                var s: Double = sin(p1) * 0.28
+                s += sin(p1 * 2.0) * 0.14
+                s += sin(p1 * 3.0) * 0.08
+                s += sin(p1 * 5.0) * 0.04
+                // Osc 2: detuned
+                s += sin(p2) * 0.22
+                s += sin(p2 * 3.0) * 0.07
+                s += sin(p2 * 5.0) * 0.03
+                // Sub-bass throb
+                let subAmp: Double = 0.10 + boost * 0.15
+                s += sin(ps) * subAmp
+                // Pulse amplitude modulation
+                let pArg: Double = Double(frame) / sampleRate * pulseRate * 2.0 * Double.pi
+                let pulse: Double = 0.80 + 0.20 * sin(pArg + state.phase * 40.0)
+                s *= vol * pulse
+                let sample = Float(s)
                 for buf in ablPtr {
                     let ptr = UnsafeMutableBufferPointer<Float>(buf)
-                    if frame < ptr.count { ptr[frame] = Float(s) }
+                    if frame < ptr.count { ptr[frame] = sample }
                 }
             }
             return noErr
         }
-        // Wind noise layer — filtered noise that builds with speed
+        // Filtered turbine rush — bandpass-like filtered noise
         let windNode = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList -> OSStatus in
-            let spd = Double(state.speed)
-            let vol = spd * spd * 0.12
+            let spd: Double = Double(state.speed)
+            let vol: Double = spd * spd * 0.09
+            let lpfCoeff: Double = 0.92 - spd * 0.12
             let ablPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
             for frame in 0..<Int(frameCount) {
-                state.windPhase = state.windPhase * 0.97 + Double.random(in: -1...1) * 0.03
-                let s = state.windPhase * vol
+                let noise: Double = Double.random(in: -1...1)
+                let oneMinusLPF: Double = 1.0 - lpfCoeff
+                state.windPhase = state.windPhase * lpfCoeff + noise * oneMinusLPF
+                state.windLPF = state.windLPF * 0.85 + state.windPhase * 0.15
+                let sample = Float(state.windLPF * vol)
                 for buf in ablPtr {
                     let ptr = UnsafeMutableBufferPointer<Float>(buf)
-                    if frame < ptr.count { ptr[frame] = Float(s) }
+                    if frame < ptr.count { ptr[frame] = sample }
                 }
             }
             return noErr
@@ -493,6 +517,14 @@ final class GameViewController: UIViewController {
         scnView.layer.add(anim, forKey: "crashShake")
     }
 
+    private func doSmashShake(intensity: Float) {
+        let s = CGFloat(intensity)
+        let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        anim.values = [0, -6*s, 4*s, -2*s, 0]
+        anim.duration = 0.2; anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        scnView.layer.add(anim, forKey: "smashShake")
+    }
+
     // MARK: - Haptics
     private func playHaptic(intensity: Float, sharpness: Float) {
         guard let engine = hapticEngine else { return }
@@ -650,8 +682,11 @@ final class GameViewController: UIViewController {
 // MARK: - Audio state (class so it's safely captured by AVAudioSourceNode closure)
 private final class AudioState {
     var phase: Double = 0
+    var phase2: Double = 0      // detuned oscillator
+    var subPhase: Double = 0    // sub-bass throb
     var speed: Float  = 0
     var windPhase: Double = 0
+    var windLPF: Double = 0     // low-pass filtered wind
     var boostPitchOffset: Double = 0
 }
 
