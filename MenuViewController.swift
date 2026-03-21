@@ -10,7 +10,7 @@ enum Difficulty: String, CaseIterable {
     var clearZone:   Float  { 16.0 }
 }
 
-enum GameMode { case race, infinite }
+enum GameMode { case race, openWorld }
 
 enum GraphicsQuality: String, CaseIterable {
     case low, medium, high
@@ -42,22 +42,23 @@ enum GraphicsQuality: String, CaseIterable {
 
 struct BestTimes {
     private static func key(_ d: Difficulty, _ m: GameMode) -> String {
-        "\(m == .race ? "race" : "inf")_\(d.rawValue)"
+        "\(m == .race ? "race" : "ow")_\(d.rawValue)"
     }
     static func get(_ d: Difficulty, _ m: GameMode) -> Float? {
+        guard m == .race else { return nil }
         let v = UserDefaults.standard.float(forKey: key(d, m))
         return v > 0 ? v : nil
     }
     static func save(_ value: Float, _ d: Difficulty, _ m: GameMode) {
+        guard m == .race else { return }
         let k = key(d, m)
         let ex = UserDefaults.standard.float(forKey: k)
-        let better = m == .infinite ? (ex == 0 || value > ex) : (ex == 0 || value < ex)
+        let better = ex == 0 || value < ex
         if better { UserDefaults.standard.set(value, forKey: k) }
     }
     static func formatted(_ d: Difficulty, _ m: GameMode) -> String {
-        guard let v = get(d, m) else { return "--" }
-        if m == .race { return formatTime(v) }
-        return String(format: "%.1f km", v / 1000)
+        guard m == .race, let v = get(d, m) else { return "--" }
+        return formatTime(v)
     }
     static func formatTime(_ t: Float) -> String {
         let m = Int(t) / 60; let s = Int(t) % 60; let ms = Int((t - Float(Int(t))) * 1000)
@@ -86,7 +87,7 @@ final class MenuViewController: UIViewController {
     override func viewDidLoad()      { super.viewDidLoad(); buildUI() }
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshBestLabel() }
     override var prefersStatusBarHidden: Bool { true }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscapeRight }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
 
     // MARK: - UI construction
@@ -174,8 +175,8 @@ final class MenuViewController: UIViewController {
         let modeTitle = label("MODE", size: 10, weight: .semibold, color: UIColor(white: 0.5, alpha: 1))
         modeTitle.letterSpacing(3)
         let modeRow = UIStackView(); modeRow.axis = .horizontal; modeRow.spacing = 10
-        for m in [GameMode.race, GameMode.infinite] {
-            let btn = toggleBtn(m == .race ? "RACE" : "INFINITE", tag: m == .race ? 0 : 1,
+        for m in [GameMode.race, GameMode.openWorld] {
+            let btn = toggleBtn(m == .race ? "RACE" : "OPEN WORLD", tag: m == .race ? 0 : 1,
                                 action: #selector(modeTapped(_:)))
             modeButtons[m] = btn; modeRow.addArrangedSubview(btn)
         }
@@ -361,7 +362,7 @@ final class MenuViewController: UIViewController {
     // MARK: - State refresh
 
     private func refreshSelectionLabel() {
-        let mode = selectedMode == .race ? "RACE" : "INFINITE"
+        let mode = selectedMode == .race ? "RACE" : "OPEN WORLD"
         selectionLabel?.text = mode
     }
 
@@ -401,7 +402,7 @@ final class MenuViewController: UIViewController {
     // MARK: - Selection actions
 
     @objc private func modeTapped(_ sender: UIButton) {
-        selectedMode = sender.tag == 0 ? .race : .infinite
+        selectedMode = sender.tag == 0 ? .race : .openWorld
         refreshModeButtons(); refreshBestLabel(); refreshSelectionLabel()
     }
 
@@ -432,7 +433,8 @@ final class MenuViewController: UIViewController {
         spinner.color = UIColor(red: 0.30, green: 0.82, blue: 0.50, alpha: 1)
         spinner.startAnimating()
 
-        let loadingLbl = label("GENERATING FOREST...", size: 10, weight: .semibold,
+        let loadingMsg = selectedMode == .openWorld ? "GENERATING WORLD..." : "GENERATING FOREST..."
+        let loadingLbl = label(loadingMsg, size: 10, weight: .semibold,
                                color: UIColor(red: 0.35, green: 0.65, blue: 0.45, alpha: 0.70))
         loadingLbl.letterSpacing(4); loadingLbl.textAlignment = .center
 
@@ -440,7 +442,7 @@ final class MenuViewController: UIViewController {
         spinRow.axis = .horizontal; spinRow.spacing = 10; spinRow.alignment = .center
 
         // Mode info
-        let modeName = selectedMode == .race ? "RACE" : "INFINITE"
+        let modeName = selectedMode == .race ? "RACE" : "OPEN WORLD"
         let infoLbl = label(modeName, size: 12, weight: .semibold,
                             color: UIColor(red: 0.35, green: 0.85, blue: 0.50, alpha: 0.60))
         infoLbl.textAlignment = .center

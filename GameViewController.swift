@@ -29,6 +29,7 @@ final class GameViewController: UIViewController {
     private var isBraking    = false
     private var hudUpdatePending = false
     private var boostSatTimer: Float = 0
+    private var liftBaseline: Float?
 
     private lazy var boostButton:    UIButton = makeBoostButton()
     private lazy var throttleButton: UIButton = makeThrottleButton()
@@ -583,6 +584,7 @@ final class GameViewController: UIViewController {
     @objc private func resetPressed() {
         crashTryAgainBtn?.isEnabled = true; crashTryAgainBtn?.alpha = 1.0
         gameScene.resetRace()
+        resetLiftBaseline()
         finishOverlay.isHidden = true
         crashOverlay.isHidden = true; crashOverlay.alpha = 1.0
         timerLabel.text = "0:00.000"
@@ -635,18 +637,24 @@ final class GameViewController: UIViewController {
 
         switch gameScene.raceState {
         case .waiting:
-            timerLabel.text = "0:00.000"; finishOverlay.isHidden = true; crashOverlay.isHidden = true
+            if mode == .openWorld {
+                timerLabel.text = ""
+            } else {
+                timerLabel.text = "0:00.000"
+            }
+            finishOverlay.isHidden = true; crashOverlay.isHidden = true
         case .racing:
-            timerLabel.text = mode == .race ? BestTimes.formatTime(gameScene.raceTime)
-                                            : String(format: "%.0f m", gameScene.distanceCovered)
+            if mode == .openWorld {
+                timerLabel.text = ""
+            } else {
+                timerLabel.text = BestTimes.formatTime(gameScene.raceTime)
+            }
             finishOverlay.isHidden = true; crashOverlay.isHidden = true
         case .finished:
             let score = gameScene.raceTime
             timerLabel.text = BestTimes.formatTime(score)
-            // Wait for finish camera sweep to end before showing overlay
             if finishOverlay.isHidden && !gameScene.finishCamActive {
                 BestTimes.save(score, difficulty, mode)
-                // Save checkpoint splits for future comparison
                 let splits = gameScene.checkpointTimes
                 if !splits.isEmpty {
                     let existing = UserDefaults.standard.array(forKey: splitKey()) as? [Float] ?? []
@@ -655,11 +663,9 @@ final class GameViewController: UIViewController {
                         bestSplits = splits
                     }
                 }
-                finishTimeLabel.text = mode == .race ? BestTimes.formatTime(score)
-                                                     : String(format: "%.1f km", gameScene.distanceCovered / 1000)
+                finishTimeLabel.text = BestTimes.formatTime(score)
                 if let best = BestTimes.get(difficulty, mode) {
-                    bestTimeLabel.text = "BEST  " + (mode == .race ? BestTimes.formatTime(best)
-                                                                   : String(format: "%.1f km", best / 1000))
+                    bestTimeLabel.text = "BEST  " + BestTimes.formatTime(best)
                 }
                 finishOverlay.isHidden = false
             }
@@ -675,8 +681,14 @@ final class GameViewController: UIViewController {
 
     // MARK: - Orientation
     override var prefersStatusBarHidden: Bool { true }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscapeRight }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
+
+    /// Returns -1 or +1 to flip gravity-based controls for current landscape orientation.
+    private var landscapeSign: Float {
+        guard let scene = view.window?.windowScene else { return 1 }
+        return scene.interfaceOrientation == .landscapeLeft ? -1 : 1
+    }
 }
 
 // MARK: - Audio state (class so it's safely captured by AVAudioSourceNode closure)
@@ -695,7 +707,7 @@ extension GameViewController: SCNSceneRendererDelegate {
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         guard lastTime != 0 else { lastTime = time; return }
         let dt = Float(min(time - lastTime, 1.0 / 20.0)); lastTime = time
-        gameScene.update(dt: dt, steer: resolveSteer(), throttling: isThrottling, braking: isBraking)
+        gameScene.update(dt: dt, steer: resolveSteer(), throttling: isThrottling, braking: isBraking, lift: resolveLift())
         audioState.speed = max(0, gameScene.currentSpeed) / 80.0
 
         // Boost engine pitch offset — spike on activate, spool down
@@ -711,7 +723,7 @@ extension GameViewController: SCNSceneRendererDelegate {
         }
         if let cam = gameScene.cameraNode.camera {
             let baseSat = Float(quality.saturation)
-            let satBoost = boostSatTimer > 0 ? min(boostSatTimer * 2, 0.4) : Float(0)
+            let satBoost = boostSatTimer > 0 ? min(boostSatTimer * 1.5, 0.2) : Float(0)
             let targetSat = baseSat + satBoost
             let curSat = Float(cam.saturation)
             cam.saturation = CGFloat(curSat + (targetSat - curSat) * min(1, dt * 6))
@@ -728,6 +740,21 @@ extension GameViewController: SCNSceneRendererDelegate {
 
     private func resolveSteer() -> Float {
         guard let grav = motion.deviceMotion?.gravity else { return 0 }
-        return max(-1, min(1, Float(grav.y) * 1.8))
+        // gravity.y flips between landscapeLeft/Right — landscapeSign corrects it
+        return max(-1, min(1, Float(grav.y) * 1.8 * landscapeSign))
     }
+
+    private func resolveLift() -> Float {
+        guard let grav = motion.deviceMotion?.gravity else { return 0 }
+        // gravity.z: tilting top edge toward you (screen faces ceiling) → positive z
+        // This is orientation-independent, so no landscapeSign needed.
+        let tilt = Float(grav.z)
+        if liftBaseline == nil { liftBaseline = tilt }
+        let delta = tilt - liftBaseline!
+        let deadzone: Float = 0.06                  // ~3° before it kicks in
+        guard delta > deadzone else { return 0 }
+        return min(1, (delta - deadzone) * 2.5)     // smooth ramp up
+    }
+
+    func resetLiftBaseline() { liftBaseline = nil }
 }

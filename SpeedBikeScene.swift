@@ -7,7 +7,8 @@ final class SpeedBikeScene: SCNScene {
     let mode:        GameMode
     let difficulty:  Difficulty
     let quality:     GraphicsQuality
-    let trackLength: Float   // 1600 race, effectively ∞ for infinite
+    let trackLength: Float
+    let islandRadius: Float = 750.0
 
     // MARK: - Race state
     enum RaceState { case waiting, racing, finished, crashed }
@@ -56,6 +57,8 @@ final class SpeedBikeScene: SCNScene {
     private var skyNodes:    [SCNNode] = []
     private var thrusterTrail: SCNParticleSystem?
     private var pollenSystem: SCNParticleSystem?
+    private var waterSpray: SCNParticleSystem?
+    private var waterSprayNode: SCNNode?
 
     // Near-miss
     private let nearMissThreshold: Float = 2.8
@@ -86,6 +89,7 @@ final class SpeedBikeScene: SCNScene {
     // Saplings (destructible): 9 = thin sapling, 10 = young birch
     private var treeGeoms:  [SCNGeometry] = []
     private var canopyGeoms:[SCNGeometry] = []
+    private var rootFlareGeoms: [SCNGeometry] = []
     private let treeHeights:[Float] = [22, 42, 65, 35, 55, 18,  28, 30, 20,   10, 12]
     private let canopyRadii:[Float] = [5.5, 9.0, 14.0, 5.0, 7.0, 0,  4.5, 8.0, 6.0,  2.0, 2.5]
     private let trunkRadii: [Float] = [0.42, 0.80, 1.40, 0.40, 0.60, 0.55,  0.30, 0.50, 0.70,  0.15, 0.12]
@@ -132,7 +136,7 @@ final class SpeedBikeScene: SCNScene {
         self.difficulty  = difficulty
         self.mode        = mode
         self.quality     = quality
-        self.trackLength = mode == .race ? 3200 : .greatestFiniteMagnitude
+        self.trackLength = mode == .race ? 3200 : 0
         super.init()
         buildScene()
     }
@@ -140,33 +144,47 @@ final class SpeedBikeScene: SCNScene {
 
     // MARK: - Build
     private func buildScene() {
-        background.contents = UIColor(red: 0.28, green: 0.50, blue: 0.84, alpha: 1)
+        background.contents = UIColor(red: 0.45, green: 0.68, blue: 0.96, alpha: 1)
         fogColor = UIColor(red: 0.38, green: 0.58, blue: 0.44, alpha: 1)
         fogStartDistance = 160; fogEndDistance = 420
         lightingEnvironment.contents = UIColor(white: 0.5, alpha: 1)
         lightingEnvironment.intensity = 1.0
 
-        buildTreeGeoms(); addLighting(); addSky(); buildGround()
-        if mode == .race { buildRacingLevel(); buildTrackDecorations() }
+        buildTreeGeoms(); buildBoulderGeoms(); addLighting(); addSky()
 
-        worldX  = trackCenterX(worldZ)
-        heading = spawnHeading()
+        if mode == .openWorld {
+            fogColor = UIColor(red: 0.48, green: 0.60, blue: 0.78, alpha: 1)
+            fogStartDistance = 500; fogEndDistance = 2000
+            buildOpenWorldGround()
+            buildSeaPlane()
+            worldX = 0; worldZ = 0; heading = 0
+        } else {
+            buildGround()
+            buildRacingLevel(); buildTrackDecorations()
+            worldX = trackCenterX(worldZ)
+            heading = spawnHeading()
+        }
+
         buildSpeeder()
         buildCamera()
         buildCanopyShadows()
 
-        if mode == .infinite {
-            lastTreeZ = worldZ
-            streamTrees(zStart: worldZ - 20, zEnd: worldZ + quality.streamRange)
+        if mode == .openWorld {
+            buildOpenWorldVegetation()
         } else {
             buildAllTrees()
+            buildForestPools()
         }
     }
 
     // MARK: - Reset
     func resetRace() {
-        let sz: Float = -12
-        worldZ = sz; worldX = trackCenterX(sz); heading = spawnHeading()
+        if mode == .openWorld {
+            worldX = 0; worldZ = 0; heading = 0
+        } else {
+            let sz: Float = -12
+            worldZ = sz; worldX = trackCenterX(sz); heading = spawnHeading()
+        }
         turnRate = 0; forwardSpeed = 0; speederY = 2; camY = 4
         bankAngle = 0; pitchAngle = 0; velocityY = 0
         camBankAngle = 0; currentFOV = 88; boostTimer = 0; boostEnergy = 1.0
@@ -177,10 +195,6 @@ final class SpeedBikeScene: SCNScene {
         boostFOVKick = 0; boostJustActivated = false; currentFogLerp = 0
         speederPivot.isHidden = false
         speederPivot.position = SCNVector3(worldX, 2, worldZ)
-        if mode == .infinite {
-            lastTreeZ = worldZ
-            streamTrees(zStart: worldZ - 20, zEnd: worldZ + quality.streamRange)
-        }
     }
 
     private func spawnHeading() -> Float { atan2(trackCenterX(10) - trackCenterX(-10), 20) }
@@ -224,10 +238,10 @@ final class SpeedBikeScene: SCNScene {
     // MARK: - Sky
     private func addSky() {
         let domes: [(Double, UIColor)] = [
-            (3100, UIColor(red: 0.32, green: 0.55, blue: 0.92, alpha: 1)),   // upper sky
-            (3070, UIColor(red: 0.38, green: 0.62, blue: 0.90, alpha: 1)),   // mid sky
-            (3040, UIColor(red: 0.52, green: 0.72, blue: 0.58, alpha: 1)),   // warm horizon haze
-            (3010, UIColor(red: 0.18, green: 0.52, blue: 0.26, alpha: 1)),   // treeline blend
+            (3100, UIColor(red: 0.45, green: 0.68, blue: 0.96, alpha: 1)),   // upper sky — bright blue
+            (3070, UIColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1)),   // mid sky
+            (3040, UIColor(red: 0.70, green: 0.82, blue: 0.92, alpha: 1)),   // warm horizon haze — pale
+            (3010, UIColor(red: 0.58, green: 0.74, blue: 0.68, alpha: 1)),   // treeline blend — soft green-blue
         ]
         let skySegs = quality == .low ? 6 : quality == .medium ? 8 : 12
         for (r, col) in domes {
@@ -236,6 +250,7 @@ final class SpeedBikeScene: SCNScene {
             m.isDoubleSided = true; m.lightingModel = .constant; s.firstMaterial = m
             let n = SCNNode(geometry: s); skyNodes.append(n); rootNode.addChildNode(n)
         }
+        // Sun
         let core = SCNSphere(radius: 20); core.segmentCount = 8
         let cm = SCNMaterial(); cm.diffuse.contents = UIColor(red: 1, green: 0.97, blue: 0.90, alpha: 1)
         cm.emission.contents = UIColor(red: 1, green: 0.93, blue: 0.76, alpha: 1); cm.lightingModel = .constant
@@ -246,11 +261,146 @@ final class SpeedBikeScene: SCNScene {
         hm.isDoubleSided = true; hm.transparency = 0.60; halo.firstMaterial = hm
         sunNode.addChildNode(SCNNode(geometry: halo))
         sunNode.position = SCNVector3(480, 430, -880); rootNode.addChildNode(sunNode)
+
+        // Clouds
+        addClouds()
+
+        // Distant mountains (open world only)
+        if mode == .openWorld { addDistantMountains() }
+    }
+
+    private func addClouds() {
+        var rng: UInt64 = 0xc10dface
+        func rnd() -> Float {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(rng >> 33) / Float(1 << 31)
+        }
+
+        let cloudMat = SCNMaterial()
+        // Keep color well below bloom threshold to prevent glow
+        cloudMat.diffuse.contents = UIColor(red: 0.72, green: 0.74, blue: 0.78, alpha: 0.50)
+        cloudMat.lightingModel = .constant; cloudMat.isDoubleSided = true
+        cloudMat.writesToDepthBuffer = false
+        // Clamp output to prevent bloom — cap brightness in fragment shader
+        cloudMat.shaderModifiers = [
+            .fragment: """
+            float3 c = _surface.diffuse.rgb;
+            c = min(c, float3(0.75));
+            _output.color = float4(c, _surface.diffuse.a);
+            """
+        ]
+
+        // Wispy edge material — more transparent for softer edges
+        let wispMat = SCNMaterial()
+        wispMat.diffuse.contents = UIColor(red: 0.70, green: 0.72, blue: 0.76, alpha: 0.18)
+        wispMat.lightingModel = .constant; wispMat.isDoubleSided = true
+        wispMat.writesToDepthBuffer = false
+        wispMat.shaderModifiers = [
+            .fragment: """
+            float3 c = _surface.diffuse.rgb;
+            c = min(c, float3(0.75));
+            _output.color = float4(c, _surface.diffuse.a);
+            """
+        ]
+
+        let cloudContainer = SCNNode()
+
+        let cloudCount = quality == .low ? 14 : quality == .medium ? 24 : 36
+        for _ in 0..<cloudCount {
+            let cloudNode = SCNNode()
+            // Core puffs — overlapping flattened spheres
+            let coreCount = Int(rnd() * 4) + 4
+            for j in 0..<coreCount {
+                let r = CGFloat(12 + rnd() * 20)
+                let puff = SCNSphere(radius: r)
+                puff.segmentCount = quality == .low ? 5 : 7
+                puff.firstMaterial = cloudMat
+                let n = SCNNode(geometry: puff)
+                n.position = SCNVector3((rnd() - 0.5) * 50, (rnd() - 0.5) * 5, (rnd() - 0.5) * 20)
+                // Flatten vertically for cloud shape
+                let yScale = 0.25 + rnd() * 0.15
+                let xScale = 0.9 + rnd() * 0.4
+                n.scale = SCNVector3(xScale, yScale, 1.0)
+                n.castsShadow = false
+                cloudNode.addChildNode(n)
+
+                // Wispy outer halo on some puffs
+                if j % 2 == 0 {
+                    let haloR = r * 1.5
+                    let halo = SCNSphere(radius: haloR)
+                    halo.segmentCount = quality == .low ? 4 : 6
+                    halo.firstMaterial = wispMat
+                    let hn = SCNNode(geometry: halo)
+                    hn.position = n.position
+                    hn.scale = SCNVector3(xScale * 1.2, yScale * 0.8, 1.3)
+                    hn.castsShadow = false
+                    cloudNode.addChildNode(hn)
+                }
+            }
+
+            let angle = rnd() * .pi * 2
+            let dist: Float = 600 + rnd() * 2000
+            let height: Float = 180 + rnd() * 280
+            cloudNode.position = SCNVector3(sin(angle) * dist, height, cos(angle) * dist)
+            cloudNode.castsShadow = false
+            cloudContainer.addChildNode(cloudNode)
+        }
+
+        skyNodes.append(cloudContainer)
+        rootNode.addChildNode(cloudContainer)
+    }
+
+    private func addDistantMountains() {
+        var rng: UInt64 = 0xb16b00b5
+        func rnd() -> Float {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(rng >> 33) / Float(1 << 31)
+        }
+
+        let mtContainer = SCNNode()
+        let peakCount = quality == .low ? 16 : quality == .medium ? 24 : 36
+
+        for i in 0..<peakCount {
+            let angle = Float(i) / Float(peakCount) * .pi * 2 + (rnd() - 0.5) * 0.15
+            let dist: Float = 1400 + rnd() * 400
+            let height: Float = 60 + rnd() * 180
+            let width: Float = 80 + rnd() * 200
+
+            let cone = SCNCone(topRadius: 0, bottomRadius: CGFloat(width * 0.5), height: CGFloat(height))
+            cone.radialSegmentCount = 6; cone.heightSegmentCount = 1
+            let mat = SCNMaterial()
+            let shade = 0.35 + rnd() * 0.15
+            mat.diffuse.contents = UIColor(red: CGFloat(shade * 0.7), green: CGFloat(shade * 0.8),
+                                           blue: CGFloat(shade * 1.0), alpha: 1)
+            mat.lightingModel = .lambert
+            cone.firstMaterial = mat
+
+            let n = SCNNode(geometry: cone)
+            n.position = SCNVector3(sin(angle) * dist, height * 0.3, cos(angle) * dist)
+            n.castsShadow = false
+            mtContainer.addChildNode(n)
+
+            if height > 140 && rnd() > 0.3 {
+                let cap = SCNCone(topRadius: 0, bottomRadius: CGFloat(width * 0.18), height: CGFloat(height * 0.25))
+                cap.radialSegmentCount = 6; cap.heightSegmentCount = 1
+                let snowMat = SCNMaterial()
+                snowMat.diffuse.contents = UIColor(red: 0.88, green: 0.90, blue: 0.94, alpha: 1)
+                snowMat.lightingModel = .lambert
+                cap.firstMaterial = snowMat
+                let capNode = SCNNode(geometry: cap)
+                capNode.position = SCNVector3(0, height * 0.42, 0)
+                capNode.castsShadow = false
+                n.addChildNode(capNode)
+            }
+        }
+
+        skyNodes.append(mtContainer)
+        rootNode.addChildNode(mtContainer)
     }
 
     // MARK: - Canopy shadow patches on ground
     private func buildCanopyShadows() {
-        let maxZ = mode == .race ? trackLength : Float(800)
+        guard mode == .race else { return } // open world gets shadows from tree nodes
         var rng: UInt64 = 0x12345678
         func rnd() -> Float {
             rng = rng &* 6364136223846793005 &+ 1442695040888963407
@@ -260,7 +410,7 @@ final class SpeedBikeScene: SCNScene {
         shadowMat.diffuse.contents = UIColor(red: 0.02, green: 0.06, blue: 0.02, alpha: 1)
         shadowMat.lightingModel = .constant; shadowMat.transparency = 0.22; shadowMat.writesToDepthBuffer = false
         var z: Float = 60
-        while z < maxZ {
+        while z < trackLength {
             let tc = trackCenterX(z)
             let w = CGFloat(8 + rnd() * 10); let h = CGFloat(5 + rnd() * 6)
             let plane = SCNPlane(width: w, height: h); plane.firstMaterial = shadowMat
@@ -329,6 +479,337 @@ final class SpeedBikeScene: SCNScene {
         let img = UIGraphicsGetImageFromCurrentImageContext()!; UIGraphicsEndImageContext(); return img
     }
 
+    /// Detail texture for multiply-blending on open world ground.
+    /// Kept bright and even — no dark patches. Grass blades only.
+    private func makeGrassDetailTex() -> UIImage {
+        let sz: CGFloat = 512
+        UIGraphicsBeginImageContextWithOptions(CGSize(width: sz, height: sz), true, 1)
+        let ctx = UIGraphicsGetCurrentContext()!
+        // Bright even base — multiply preserves biome colors cleanly
+        ctx.setFillColor(UIColor(red: 0.78, green: 0.92, blue: 0.70, alpha: 1).cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: sz, height: sz))
+        var rng: UInt64 = 0xfade9876cafe5432
+        func nr() -> CGFloat {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return CGFloat(rng >> 33) / CGFloat(1 << 31)
+        }
+        // Subtle micro-variation — small bright/slightly-darker spots, no dirt
+        for _ in 0..<300 {
+            let x = nr() * sz; let y = nr() * sz
+            let w = nr() * 2.5 + 0.5; let h = nr() * 2.0 + 0.5
+            let v = 0.72 + nr() * 0.22  // range 0.72–0.94, never very dark
+            ctx.setFillColor(UIColor(red: v * 0.90, green: v, blue: v * 0.82, alpha: 0.3).cgColor)
+            ctx.fill(CGRect(x: x, y: y, width: w, height: h))
+        }
+        // Dense grass blade strokes — all green tones, no dark outliers
+        for _ in 0..<1200 {
+            let x = nr() * sz; let y = nr() * sz
+            let len = nr() * 10 + 2
+            let ang = nr() * .pi - .pi * 0.5
+            let t = nr()
+            let (r, g, b): (CGFloat, CGFloat, CGFloat)
+            if t < 0.35 { (r,g,b) = (0.60, 0.82, 0.45) }      // mid green blade
+            else if t < 0.65 { (r,g,b) = (0.70, 0.92, 0.52) }  // bright blade
+            else { (r,g,b) = (0.80, 0.98, 0.60) }               // highlight blade
+            ctx.setLineWidth(nr() * 0.6 + 0.4)
+            ctx.setStrokeColor(UIColor(red: r, green: g, blue: b, alpha: nr() * 0.4 + 0.4).cgColor)
+            ctx.move(to: CGPoint(x: x, y: y))
+            ctx.addLine(to: CGPoint(x: x + cos(ang) * len, y: y + sin(ang) * len))
+            ctx.strokePath()
+        }
+        let img = UIGraphicsGetImageFromCurrentImageContext()!; UIGraphicsEndImageContext(); return img
+    }
+
+    // MARK: - Open World Ground & Sea
+
+    private func buildOpenWorldGround() {
+        let texSize = quality == .low ? 2048 : 4096
+        let worldSize: Float = 1600
+        let img = makeOpenWorldTex(size: texSize, worldSize: worldSize)
+
+        // Build terrain mesh with height variation
+        let gridRes = quality == .low ? 120 : quality == .medium ? 180 : 240
+        let half = worldSize * 0.5
+        let step = worldSize / Float(gridRes)
+
+        var verts = [SCNVector3](); verts.reserveCapacity((gridRes + 1) * (gridRes + 1))
+        var normals = [SCNVector3](); normals.reserveCapacity(verts.capacity)
+        var uvs = [CGPoint](); uvs.reserveCapacity(verts.capacity)
+        var indices = [Int32](); indices.reserveCapacity(gridRes * gridRes * 6)
+
+        for iz in 0...gridRes {
+            for ix in 0...gridRes {
+                let wx = Float(ix) * step - half
+                let wz = Float(iz) * step - half
+                let y = terrainHeight(wx, wz) - 0.05
+                verts.append(SCNVector3(wx, y, wz))
+
+                // UV maps to texture
+                uvs.append(CGPoint(x: CGFloat(ix) / CGFloat(gridRes),
+                                   y: CGFloat(iz) / CGFloat(gridRes)))
+
+                // Compute normal from height gradient
+                let dx = terrainHeight(wx + 1, wz) - terrainHeight(wx - 1, wz)
+                let dz = terrainHeight(wx, wz + 1) - terrainHeight(wx, wz - 1)
+                let nx = -dx; let nz = -dz; let ny: Float = 2.0
+                let len = sqrtf(nx * nx + ny * ny + nz * nz)
+                normals.append(SCNVector3(nx / len, ny / len, nz / len))
+            }
+        }
+
+        let cols = Int32(gridRes + 1)
+        for iz in 0..<gridRes {
+            for ix in 0..<gridRes {
+                let tl = Int32(iz) * cols + Int32(ix)
+                let tr = tl + 1
+                let bl = tl + cols
+                let br = bl + 1
+                indices.append(contentsOf: [tl, bl, tr, tr, bl, br])
+            }
+        }
+
+        let vertSrc  = SCNGeometrySource(vertices: verts)
+        let normSrc  = SCNGeometrySource(normals: normals)
+        let uvSrc    = SCNGeometrySource(textureCoordinates: uvs)
+        let idxData  = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+        let element  = SCNGeometryElement(data: idxData, primitiveType: .triangles,
+                                          primitiveCount: indices.count / 3,
+                                          bytesPerIndex: MemoryLayout<Int32>.size)
+        let geo = SCNGeometry(sources: [vertSrc, normSrc, uvSrc], elements: [element])
+
+        let mat = SCNMaterial()
+        mat.diffuse.contents = img
+        mat.diffuse.wrapS = .clampToBorder; mat.diffuse.wrapT = .clampToBorder
+        mat.diffuse.intensity = 0.8  // prevent bloom glow on ground
+        mat.lightingModel = .lambert; mat.isDoubleSided = false
+        // Tiled grass detail overlay — tiles for close-up crispness
+        let detailTex = makeGrassDetailTex()
+        mat.multiply.contents = detailTex
+        mat.multiply.wrapS = .repeat; mat.multiply.wrapT = .repeat
+        mat.multiply.intensity = 1.0
+        // Tile every ~8 world-meters: worldSize/8 = 200 tiles across
+        let tileScale = Float(worldSize) / 8.0
+        mat.multiply.contentsTransform = SCNMatrix4MakeScale(tileScale, tileScale, 1)
+        geo.firstMaterial = mat
+
+        groundNode = SCNNode(geometry: geo)
+        groundNode.position = SCNVector3(0, 0, 0)
+        rootNode.addChildNode(groundNode)
+    }
+
+    private func makeOpenWorldTex(size: Int, worldSize: Float) -> UIImage {
+        let sz = CGFloat(size)
+        UIGraphicsBeginImageContextWithOptions(CGSize(width: sz, height: sz), true, 1)
+        let ctx = UIGraphicsGetCurrentContext()!
+
+        // Fill with water color as base
+        ctx.setFillColor(UIColor(red: 0.12, green: 0.32, blue: 0.52, alpha: 1).cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: sz, height: sz))
+
+        var rng: UInt64 = 0xdeadbeefcafe1337
+        func nr() -> CGFloat {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return CGFloat(rng >> 33) / CGFloat(1 << 31)
+        }
+
+        let half = worldSize * 0.5
+        for py in 0..<size {
+            for px in 0..<size {
+                let wx = Float(px) / Float(size) * worldSize - half
+                let wz = Float(py) / Float(size) * worldSize - half
+                let dist = sqrtf(wx * wx + wz * wz)
+                guard dist < islandRadius + 10 else { continue }
+
+                let biome = biomeAt(x: wx, z: wz)
+                let noise = nr() * 0.08 // micro variation
+
+                let (r, g, b): (CGFloat, CGFloat, CGFloat)
+                switch biome {
+                case .forest:
+                    // Match race-mode ground palette
+                    let t = nr()
+                    if t < 0.22 { (r,g,b) = (0.09 + noise, 0.20 + noise, 0.04 + noise) }      // dark shadow
+                    else if t < 0.48 { (r,g,b) = (0.20 + noise, 0.46 + noise, 0.10 + noise) }  // bright grass
+                    else if t < 0.64 { (r,g,b) = (0.15 + noise, 0.10 + noise, 0.04 + noise) }  // dark soil
+                    else if t < 0.80 { (r,g,b) = (0.14 + noise, 0.32 + noise, 0.08 + noise) }  // base earthy green
+                    else { (r,g,b) = (0.24 + noise, 0.52 + noise, 0.14 + noise) }               // vivid highlight
+                case .grassyPlain:
+                    // Slightly brighter variant of the race-mode palette
+                    let t = nr()
+                    if t < 0.3 { (r,g,b) = (0.20 + noise, 0.46 + noise, 0.10 + noise) }       // bright grass
+                    else if t < 0.6 { (r,g,b) = (0.24 + noise, 0.52 + noise, 0.14 + noise) }   // vivid highlight
+                    else { (r,g,b) = (0.14 + noise, 0.32 + noise, 0.08 + noise) }               // earthy green
+                case .sand:
+                    let t = nr()
+                    if t < 0.5 { (r,g,b) = (0.52 + noise, 0.45 + noise, 0.28 + noise) }
+                    else { (r,g,b) = (0.48 + noise, 0.42 + noise, 0.26 + noise) }
+                case .beach:
+                    let edgeFade = CGFloat(max(0, (dist - (islandRadius - 40)) / 40))
+                    (r,g,b) = (0.58 + noise - edgeFade * 0.12,
+                               0.52 + noise - edgeFade * 0.10,
+                               0.36 + noise - edgeFade * 0.04)
+                }
+
+                // Soft circular edge blend to water
+                if dist > islandRadius - 15 {
+                    let blend = CGFloat(min(1, (dist - (islandRadius - 15)) / 15))
+                    let wr: CGFloat = 0.12, wg: CGFloat = 0.32, wb: CGFloat = 0.52
+                    let fr = r + (wr - r) * blend
+                    let fg = g + (wg - g) * blend
+                    let fb = b + (wb - b) * blend
+                    ctx.setFillColor(UIColor(red: fr, green: fg, blue: fb, alpha: 1).cgColor)
+                } else {
+                    ctx.setFillColor(UIColor(red: r, green: g, blue: b, alpha: 1).cgColor)
+                }
+                ctx.fill(CGRect(x: CGFloat(px), y: CGFloat(py), width: 1, height: 1))
+            }
+        }
+
+        // Grass blade strokes — matching race-mode detail
+        ctx.setLineWidth(0.7)
+        let bladeCount = size * size / 80  // scale with resolution
+        for _ in 0..<bladeCount {
+            let px = nr() * sz; let py = nr() * sz
+            let wx = Float(px) / Float(sz) * worldSize - half
+            let wz = Float(py) / Float(sz) * worldSize - half
+            let dist = sqrtf(wx * wx + wz * wz)
+            guard dist < islandRadius - 20 else { continue }
+            let biome = biomeAt(x: wx, z: wz)
+            guard biome == .forest || biome == .grassyPlain else { continue }
+            let len = nr() * 6 + 1.5
+            let ang = nr() * .pi - .pi * 0.5
+            let bright = nr() * 0.18
+            ctx.setStrokeColor(UIColor(red: 0.15 + bright, green: 0.36 + bright * 2.6,
+                                       blue: 0.05 + bright * 0.4, alpha: nr() * 0.5 + 0.4).cgColor)
+            ctx.move(to: CGPoint(x: px, y: py))
+            ctx.addLine(to: CGPoint(x: px + cos(ang) * len, y: py + sin(ang) * len))
+            ctx.strokePath()
+        }
+
+        // Wildflower patches — subtle color dots in grassy plains
+        for _ in 0..<(size * size / 600) {
+            let px = nr() * sz; let py = nr() * sz
+            let wx = Float(px) / Float(sz) * worldSize - half
+            let wz = Float(py) / Float(sz) * worldSize - half
+            let dist = sqrtf(wx * wx + wz * wz)
+            guard dist < islandRadius - 40, biomeAt(x: wx, z: wz) == .grassyPlain else { continue }
+            let flowerType = nr()
+            let (fr, fg, fb): (CGFloat, CGFloat, CGFloat)
+            if flowerType < 0.3 { (fr,fg,fb) = (0.72, 0.65, 0.18) }       // yellow
+            else if flowerType < 0.55 { (fr,fg,fb) = (0.70, 0.30, 0.55) }  // purple
+            else if flowerType < 0.75 { (fr,fg,fb) = (0.80, 0.80, 0.75) }  // white
+            else { (fr,fg,fb) = (0.65, 0.20, 0.18) }                        // red
+            ctx.setFillColor(UIColor(red: fr, green: fg, blue: fb, alpha: 0.55 + nr() * 0.3).cgColor)
+            let dotR = nr() * 1.2 + 0.4
+            ctx.fillEllipse(in: CGRect(x: px - dotR, y: py - dotR, width: dotR * 2, height: dotR * 2))
+        }
+
+        // Dirt path traces — winding trails between biomes
+        var pathRng: UInt64 = 0xda7e1234
+        func pr() -> Float {
+            pathRng = pathRng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(pathRng >> 33) / Float(1 << 31)
+        }
+        let pathCount = 5
+        for _ in 0..<pathCount {
+            var px = pr() * Float(size); var py = pr() * Float(size)
+            let angle = pr() * .pi * 2
+            var dir = angle
+            ctx.setStrokeColor(UIColor(red: 0.26, green: 0.17, blue: 0.07, alpha: 0.25).cgColor)
+            ctx.setLineWidth(CGFloat(2.0 + pr() * 2.5))
+            ctx.move(to: CGPoint(x: CGFloat(px), y: CGFloat(py)))
+            for _ in 0..<120 {
+                dir += (pr() - 0.5) * 0.4
+                let step: Float = 8 + pr() * 6
+                px += cos(dir) * step; py += sin(dir) * step
+                let wx = px / Float(size) * worldSize - half
+                let wz = py / Float(size) * worldSize - half
+                let dist = sqrtf(wx * wx + wz * wz)
+                if dist > islandRadius - 50 { break }
+                ctx.addLine(to: CGPoint(x: CGFloat(px), y: CGFloat(py)))
+            }
+            ctx.strokePath()
+        }
+
+        let img = UIGraphicsGetImageFromCurrentImageContext()!; UIGraphicsEndImageContext(); return img
+    }
+
+    private let waterLevel: Float = -0.3
+
+    private func makeWaterMaterial() -> SCNMaterial {
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor(red: 0.05, green: 0.22, blue: 0.38, alpha: 0.78)
+        mat.specular.contents = UIColor(red: 0.90, green: 0.95, blue: 1.00, alpha: 1)
+        mat.specular.intensity = 0.6
+        mat.reflective.contents = UIColor(red: 0.25, green: 0.45, blue: 0.65, alpha: 1)
+        mat.reflective.intensity = 0.3
+        mat.transparent.contents = UIColor(white: 1, alpha: 0.78)
+        mat.lightingModel = .blinn
+        mat.isDoubleSided = false
+        mat.shininess = 80
+        mat.fresnelExponent = 2.5
+        mat.writesToDepthBuffer = true
+        // Animated UV scroll for wave ripple effect
+        let scroll = CABasicAnimation(keyPath: "contentsTransform")
+        scroll.fromValue = NSValue(scnMatrix4: SCNMatrix4MakeScale(8, 8, 1))
+        scroll.toValue = NSValue(scnMatrix4: SCNMatrix4Mult(
+            SCNMatrix4MakeTranslation(0.12, 0.08, 0),
+            SCNMatrix4MakeScale(8, 8, 1)))
+        scroll.duration = 4.0; scroll.repeatCount = .infinity
+        scroll.autoreverses = true
+        mat.diffuse.addAnimation(scroll, forKey: "wave")
+        return mat
+    }
+
+    private func buildSeaPlane() {
+        let sea = SCNPlane(width: 5000, height: 5000)
+        sea.firstMaterial = makeWaterMaterial()
+        let seaNode = SCNNode(geometry: sea)
+        seaNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+        seaNode.position = SCNVector3(0, waterLevel, 0)
+        seaNode.renderingOrder = -1
+        rootNode.addChildNode(seaNode)
+        // Gentle wave oscillation
+        seaNode.runAction(.repeatForever(.sequence([
+            .moveBy(x: 0, y: 0.12, z: 0, duration: 2.5),
+            .moveBy(x: 0, y: -0.12, z: 0, duration: 2.5)
+        ])))
+    }
+
+    /// Spawn water pools along the race track as clearings
+    private func buildForestPools() {
+        guard mode == .race else { return }
+
+        var rng: UInt64 = 0x9001cafe
+        func rnd() -> Float {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(rng >> 33) / Float(1 << 31)
+        }
+
+        let poolMat = makeWaterMaterial()
+        poolMat.diffuse.contents = UIColor(red: 0.06, green: 0.20, blue: 0.32, alpha: 0.72)
+
+        var z: Float = 300
+        while z < trackLength - 200 {
+            if rnd() < 0.4 {
+                let tc = trackCenterX(z)
+                let side: Float = rnd() > 0.5 ? 1 : -1
+                let offX = 25 + rnd() * 60  // offset from track center into forest
+                let poolW = CGFloat(15 + rnd() * 30)
+                let poolH = CGFloat(10 + rnd() * 20)
+
+                let pool = SCNPlane(width: poolW, height: poolH)
+                pool.firstMaterial = poolMat; pool.cornerRadius = min(poolW, poolH) * 0.4
+                let n = SCNNode(geometry: pool)
+                n.eulerAngles.x = -.pi / 2
+                n.position = SCNVector3(tc + side * offX, -0.02, z)
+                n.renderingOrder = -1; n.castsShadow = false
+                rootNode.addChildNode(n)
+            }
+            z += 180 + rnd() * 250
+        }
+    }
+
     // MARK: - Track path
 
     func trackCenterX(_ z: Float) -> Float {
@@ -352,6 +833,66 @@ final class SpeedBikeScene: SCNScene {
     private func curvature(_ z: Float) -> Float {
         let dx = 130/380 * cos(z/380) + 70/150 * cos(z/150 + 0.8) + 28/55 * cos(z/55 + 2.2)
         return min(1, abs(dx) / 0.65)
+    }
+
+    // MARK: - Biomes (open world)
+
+    enum Biome { case forest, grassyPlain, sand, beach }
+
+    /// Deterministic hash for biome noise — same family as tree ch()
+    private func biomeHash(_ ix: Int, _ iz: Int) -> Float {
+        var h = UInt64(bitPattern: Int64(ix &* 374761393 &+ iz &* 668265263 &+ 987654321))
+        h = (h ^ (h >> 30)) &* 0xbf58476d1ce4e5b9
+        h = (h ^ (h >> 27)) &* 0x94d049bb133111eb
+        h = h ^ (h >> 31)
+        return Float(h & 0x7fffffff) / Float(0x7fffffff)
+    }
+
+    /// Bilinearly interpolated noise at world position — coarse 120m cells
+    private func biomeNoise(_ x: Float, _ z: Float) -> Float {
+        let cell: Float = 120
+        let fx = x / cell; let fz = z / cell
+        let ix = Int(floorf(fx)); let iz = Int(floorf(fz))
+        let tx = fx - Float(ix); let tz = fz - Float(iz)
+        let v00 = biomeHash(ix, iz)
+        let v10 = biomeHash(ix + 1, iz)
+        let v01 = biomeHash(ix, iz + 1)
+        let v11 = biomeHash(ix + 1, iz + 1)
+        let a = v00 + (v10 - v00) * tx
+        let b = v01 + (v11 - v01) * tx
+        return a + (b - a) * tz
+    }
+
+    func biomeAt(x: Float, z: Float) -> Biome {
+        let dist = sqrtf(x * x + z * z)
+        if dist > islandRadius - 40 { return .beach }
+
+        let n = biomeNoise(x, z)
+        // Radial bias: center favours forest, edges favour sand
+        let radialBias = dist / islandRadius       // 0 at center, ~0.95 at edge
+        let adjusted = n + radialBias * 0.25 - 0.12 // shift toward sand at edges
+
+        if adjusted < 0.30 { return .forest }
+        if adjusted < 0.62 { return .grassyPlain }
+        return .sand
+    }
+
+    // MARK: - Terrain height (open world only)
+
+    /// Smooth terrain height using layered noise — gentle rolling hills
+    func terrainHeight(_ x: Float, _ z: Float) -> Float {
+        guard mode == .openWorld else { return 0 }
+        let dist = sqrtf(x * x + z * z)
+        // Flatten near center (spawn area) and at beach edges
+        let centerFade = min(1, dist / 120)                     // flat within 120m of center
+        let edgeFade = max(0, 1 - max(0, dist - (islandRadius - 100)) / 100) // flat at beach
+
+        // Two octaves of smooth hills
+        let h1 = sinf(x * 0.008 + 1.3) * cosf(z * 0.010 + 0.7) * 12.0
+        let h2 = sinf(x * 0.022 + 5.1) * cosf(z * 0.018 + 3.2) * 4.0
+        let h3 = sinf(x * 0.005 + z * 0.006) * 8.0             // broad undulation
+
+        return (h1 + h2 + h3) * centerFade * edgeFade
     }
 
     // MARK: - Racing level (race mode only)
@@ -483,17 +1024,23 @@ final class SpeedBikeScene: SCNScene {
             (0.28, 0.16, 0.08),  // 3: conifer 1
             (0.22, 0.13, 0.07),  // 4: conifer 2
             (0.35, 0.22, 0.12),  // 5: dead tree
-            (0.82, 0.78, 0.72),  // 6: birch (white bark)
+            (0.62, 0.58, 0.52),  // 6: birch (white bark — toned down to avoid yellow glow)
             (0.28, 0.17, 0.08),  // 7: willow
             (0.32, 0.16, 0.06),  // 8: twisted oak
             (0.34, 0.22, 0.10),  // 9: sapling (destructible)
-            (0.75, 0.72, 0.66),  // 10: young birch (destructible)
+            (0.58, 0.55, 0.50),  // 10: young birch (destructible)
         ]
         for i in 0..<trunkCols.count {
             let h = treeHeights[i]
             let cyl = SCNCylinder(radius: CGFloat(trunkRadii[i]), height: CGFloat(h)); cyl.radialSegmentCount = 6; cyl.heightSegmentCount = 1
             let m = SCNMaterial(); m.diffuse.contents = UIColor(red: trunkCols[i].0, green: trunkCols[i].1, blue: trunkCols[i].2, alpha: 1)
             m.lightingModel = .lambert; cyl.firstMaterial = m; treeGeoms.append(cyl)
+            // Root flare — a small cone that widens at the base for a natural look
+            let flareH: CGFloat = CGFloat(h * 0.12)  // bottom 12% of tree
+            let flareR = CGFloat(trunkRadii[i]) * 2.2 // wider than trunk
+            let flare = SCNCone(topRadius: CGFloat(trunkRadii[i]), bottomRadius: flareR, height: flareH)
+            flare.radialSegmentCount = 6; flare.firstMaterial = m
+            rootFlareGeoms.append(flare)
         }
 
         // Canopies: 0-2 = round broadleaf, 3-4 = conical pines, 5 = dead, 6 = birch, 7 = willow, 8 = twisted oak, 9-10 = saplings
@@ -560,13 +1107,272 @@ final class SpeedBikeScene: SCNScene {
 
     // MARK: - Tree build (race = full static, infinite = streaming)
 
+    // MARK: - Open World Vegetation
+
+    private var boulderGeoms: [SCNGeometry] = []
+
+    private func buildBoulderGeoms() {
+        let sizes: [(r: CGFloat, sx: Float, sy: Float, sz: Float)] = [
+            (1.5, 1.2, 0.55, 1.0),
+            (1.0, 1.0, 0.65, 1.1),
+            (2.0, 1.3, 0.50, 0.9),
+        ]
+        for s in sizes {
+            let sphere = SCNSphere(radius: s.r)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = UIColor(red: 0.48, green: 0.42, blue: 0.36, alpha: 1)
+            mat.lightingModel = .lambert
+            sphere.firstMaterial = mat; sphere.segmentCount = 12
+            boulderGeoms.append(sphere)
+        }
+    }
+
+    private let boulderScales: [(Float, Float, Float)] = [
+        (1.2, 0.55, 1.0), (1.0, 0.65, 1.1), (1.3, 0.50, 0.9)
+    ]
+
+    private func buildOpenWorldVegetation() {
+        let geos = treeGeoms; let cGeos = canopyGeoms; let bGeos = bushGeoms
+        let fGeos = fernGeoms; let rfGeos = rootFlareGeoms
+        let gtGeo = giantTrunkGeo; let gcGeo = giantCanopyGeo
+        let heights = treeHeights; let cRadii = canopyRadii; let tRadii = trunkRadii
+        let crashSpeeds = treeCrashSpeed; let smashPenalties = treeSmashPenalty
+        let treeShadows = quality.treesCastShadows
+        let bushesOn = quality.bushesEnabled; let bushScale = quality.bushDensityScale
+        let boulders = boulderGeoms; let bScales = boulderScales
+        let solidTypeCount = 9
+        let saplingTypes = [9, 10]
+        let radius = islandRadius
+
+        treeQueue.async { [weak self] in
+            guard let self = self else { return }
+            let newRoot = SCNNode()
+            var positions = [TreeEntry]()
+
+            func ch(_ ix: Int, _ iz: Int, _ slot: Int) -> UInt64 {
+                var h = UInt64(bitPattern: Int64(ix &* 374761393 &+ iz &* 668265263 &+ slot &* 1234567891))
+                h = (h ^ (h >> 30)) &* 0xbf58476d1ce4e5b9; h = (h ^ (h >> 27)) &* 0x94d049bb133111eb
+                return h ^ (h >> 31)
+            }
+            func cr(_ ix: Int, _ iz: Int, _ slot: Int) -> Float {
+                Float(ch(ix, iz, slot) & 0x7fffffff) / Float(0x7fffffff)
+            }
+
+            let cell: Float = 10
+            let gridMin = Int(floorf(-radius / cell))
+            let gridMax = Int(ceilf(radius / cell))
+
+            for iz in gridMin...gridMax {
+                for ix in gridMin...gridMax {
+                    let baseX = Float(ix) * cell
+                    let baseZ = Float(iz) * cell
+                    let dist = sqrtf(baseX * baseX + baseZ * baseZ)
+                    guard dist < radius - 30 else { continue } // skip beach/sea
+
+                    let biome = self.biomeAt(x: baseX, z: baseZ)
+                    let jx = (cr(ix, iz, 0) - 0.5) * cell * 0.7
+                    let jz = (cr(ix, iz, 1) - 0.5) * cell * 0.7
+                    let tx = baseX + jx; let tz = baseZ + jz
+                    let gy = self.terrainHeight(tx, tz)  // ground offset
+                    // Skip vegetation below water level
+                    guard gy >= self.waterLevel else { continue }
+                    let roll = cr(ix, iz, 2)
+
+                    switch biome {
+                    case .forest:
+                        // Dense trees — similar to race mode
+                        if roll < 0.38 {
+                            let isSapling = cr(ix, iz, 5) < 0.15
+                            let gIdx: Int
+                            if isSapling {
+                                gIdx = saplingTypes[Int(cr(ix, iz, 6) * Float(saplingTypes.count - 1) + 0.5) % saplingTypes.count]
+                            } else {
+                                gIdx = Int(cr(ix, iz, 3) * Float(solidTypeCount - 1) + 0.5) % solidTypeCount
+                            }
+                            let hScale = cr(ix, iz, 4) * 0.55 + 0.72
+                            let h = heights[gIdx] * hScale
+
+                            let treeNode = SCNNode()
+                            let trunk = SCNNode(geometry: geos[gIdx])
+                            trunk.position = SCNVector3(tx, gy + h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
+                            if !treeShadows { trunk.castsShadow = false }
+                            treeNode.addChildNode(trunk)
+                            // Root flare at base
+                            if gIdx < rfGeos.count {
+                                let flare = SCNNode(geometry: rfGeos[gIdx])
+                                let flareH = heights[gIdx] * 0.12 * hScale
+                                flare.position = SCNVector3(tx, gy + flareH * 0.5, tz)
+                                flare.scale = SCNVector3(1, hScale, 1)
+                                flare.castsShadow = false; treeNode.addChildNode(flare)
+                            }
+                            let canopy = SCNNode(geometry: cGeos[gIdx])
+                            if gIdx >= 3 && gIdx <= 4 {
+                                canopy.position = SCNVector3(tx, gy + h * 0.55, tz)
+                            } else if gIdx == 5 {
+                                canopy.position = SCNVector3(tx, gy + h * 0.85, tz)
+                                canopy.scale = SCNVector3(1.2, 0.6, 1.2)
+                            } else if gIdx == 7 {
+                                canopy.position = SCNVector3(tx, gy + h * 0.65, tz)
+                                canopy.scale = SCNVector3(1.4, 0.55, 1.4)
+                            } else if gIdx == 8 {
+                                canopy.position = SCNVector3(tx + 1.0, gy + h * 0.78, tz)
+                                canopy.scale = SCNVector3(1.1, 0.65, 0.9)
+                            } else {
+                                canopy.position = SCNVector3(tx, gy + h - cRadii[gIdx] * 0.1, tz)
+                                canopy.scale = SCNVector3(1.0, 0.72, 1.0)
+                            }
+                            if !treeShadows { canopy.castsShadow = false }
+                            treeNode.addChildNode(canopy)
+                            newRoot.addChildNode(treeNode)
+                            positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2,
+                                                       crashSpeed: crashSpeeds[gIdx], smashPenalty: smashPenalties[gIdx], node: treeNode))
+                        }
+                        // Bushes in forest
+                        if bushesOn && cr(ix, iz, 7) < 0.35 * bushScale {
+                            let bi = Int(cr(ix, iz, 8) * 3.0 + 0.5) % bGeos.count
+                            let bush = SCNNode(geometry: bGeos[bi])
+                            bush.position = SCNVector3(tx + 2, gy + 0.3, tz + 1.5)
+                            bush.castsShadow = false; newRoot.addChildNode(bush)
+                        }
+                        // Ferns in forest
+                        if cr(ix, iz, 9) < 0.25 {
+                            let fi = Int(cr(ix, iz, 10) * 2.0 + 0.5) % max(1, fGeos.count)
+                            if fi < fGeos.count {
+                                let fern = SCNNode(geometry: fGeos[fi])
+                                fern.position = SCNVector3(tx - 1.5, gy + 0.05, tz - 2)
+                                fern.castsShadow = false; newRoot.addChildNode(fern)
+                            }
+                        }
+                        // Mossy boulders in forest — scattered ground detail
+                        if !boulders.isEmpty && cr(ix, iz, 14) < 0.06 {
+                            let bi = Int(cr(ix, iz, 15) * Float(boulders.count - 1) + 0.5) % boulders.count
+                            let boulder = SCNNode(geometry: boulders[bi])
+                            let s = bScales[bi]
+                            boulder.scale = SCNVector3(s.0 * 0.7, s.1 * 0.7, s.2 * 0.7)
+                            let bR = Float(boulders[bi] is SCNSphere ? (boulders[bi] as! SCNSphere).radius : 1.5)
+                            boulder.position = SCNVector3(tx - 3, gy + bR * s.1 * 0.7, tz + 2)
+                            boulder.eulerAngles.y = cr(ix, iz, 16) * .pi * 2
+                            boulder.castsShadow = false; newRoot.addChildNode(boulder)
+                        }
+                        // Giant trees — rare landmarks
+                        if let gt = gtGeo, let gc = gcGeo, cr(ix, iz, 11) < 0.008 {
+                            let giantH: Float = 85 * (cr(ix, iz, 12) * 0.3 + 0.85)
+                            let trunk = SCNNode(geometry: gt)
+                            trunk.position = SCNVector3(tx, gy + giantH * 0.5, tz)
+                            trunk.scale = SCNVector3(1, giantH / 85, 1)
+                            trunk.castsShadow = false; newRoot.addChildNode(trunk)
+                            let can = SCNNode(geometry: gc)
+                            can.position = SCNVector3(tx, gy + giantH * 0.78, tz)
+                            can.castsShadow = false; newRoot.addChildNode(can)
+                        }
+
+                    case .grassyPlain:
+                        // Very sparse — only birch and small broadleaf
+                        if roll < 0.03 {
+                            let gIdx = cr(ix, iz, 3) < 0.5 ? 0 : 6
+                            let hScale = cr(ix, iz, 4) * 0.55 + 0.72
+                            let h = heights[gIdx] * hScale
+                            let treeNode = SCNNode()
+                            let trunk = SCNNode(geometry: geos[gIdx])
+                            trunk.position = SCNVector3(tx, gy + h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
+                            if !treeShadows { trunk.castsShadow = false }
+                            treeNode.addChildNode(trunk)
+                            // Root flare at base
+                            if gIdx < rfGeos.count {
+                                let flare = SCNNode(geometry: rfGeos[gIdx])
+                                let flareH = heights[gIdx] * 0.12 * hScale
+                                flare.position = SCNVector3(tx, gy + flareH * 0.5, tz)
+                                flare.scale = SCNVector3(1, hScale, 1)
+                                flare.castsShadow = false; treeNode.addChildNode(flare)
+                            }
+                            let canopy = SCNNode(geometry: cGeos[gIdx])
+                            canopy.position = SCNVector3(tx, gy + h - cRadii[gIdx] * 0.1, tz)
+                            canopy.scale = SCNVector3(1.0, 0.72, 1.0)
+                            if !treeShadows { canopy.castsShadow = false }
+                            treeNode.addChildNode(canopy)
+                            newRoot.addChildNode(treeNode)
+                            positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2,
+                                                       crashSpeed: crashSpeeds[gIdx], smashPenalty: smashPenalties[gIdx], node: treeNode))
+                        }
+                        // Grass-like ferns scattered
+                        if cr(ix, iz, 9) < 0.12, !fGeos.isEmpty {
+                            let fern = SCNNode(geometry: fGeos[0])
+                            fern.position = SCNVector3(tx, gy + 0.05, tz)
+                            fern.castsShadow = false; newRoot.addChildNode(fern)
+                        }
+
+                    case .sand:
+                        if roll < 0.02 {
+                            let gIdx = cr(ix, iz, 3) < 0.4 ? 5 : saplingTypes[Int(cr(ix, iz, 6)) % saplingTypes.count]
+                            let hScale = cr(ix, iz, 4) * 0.55 + 0.72
+                            let h = heights[gIdx] * hScale
+                            let treeNode = SCNNode()
+                            let trunk = SCNNode(geometry: geos[gIdx])
+                            trunk.position = SCNVector3(tx, gy + h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
+                            trunk.castsShadow = false; treeNode.addChildNode(trunk)
+                            // Root flare at base
+                            if gIdx < rfGeos.count {
+                                let flare = SCNNode(geometry: rfGeos[gIdx])
+                                let flareH = heights[gIdx] * 0.12 * hScale
+                                flare.position = SCNVector3(tx, gy + flareH * 0.5, tz)
+                                flare.scale = SCNVector3(1, hScale, 1)
+                                flare.castsShadow = false; treeNode.addChildNode(flare)
+                            }
+                            let canopy = SCNNode(geometry: cGeos[gIdx])
+                            canopy.position = SCNVector3(tx, gy + h * 0.85, tz)
+                            canopy.scale = SCNVector3(1.2, 0.6, 1.2)
+                            canopy.castsShadow = false; treeNode.addChildNode(canopy)
+                            newRoot.addChildNode(treeNode)
+                            positions.append(TreeEntry(x: tx, z: tz, r: tRadii[gIdx] * 1.2,
+                                                       crashSpeed: crashSpeeds[gIdx], smashPenalty: smashPenalties[gIdx], node: treeNode))
+                        }
+                        // Boulders
+                        if !boulders.isEmpty && cr(ix, iz, 7) < 0.04 {
+                            let bi = Int(cr(ix, iz, 8) * Float(boulders.count - 1) + 0.5) % boulders.count
+                            let boulder = SCNNode(geometry: boulders[bi])
+                            let s = bScales[bi]
+                            boulder.scale = SCNVector3(s.0, s.1, s.2)
+                            let bR = Float(boulders[bi] is SCNSphere ? (boulders[bi] as! SCNSphere).radius : 1.5)
+                            boulder.position = SCNVector3(tx, gy + bR * s.1, tz)
+                            boulder.eulerAngles.y = cr(ix, iz, 13) * .pi * 2
+                            boulder.castsShadow = false; newRoot.addChildNode(boulder)
+                        }
+
+                    case .beach:
+                        break // nothing on beach
+                    }
+                }
+            }
+
+            // Build spatial grid
+            var grid = [Int64: [TreeEntry]]()
+            let gridCell: Float = 16
+            for p in positions {
+                let gx = Int(floorf(p.x / gridCell))
+                let gz = Int(floorf(p.z / gridCell))
+                let key = Int64(Int32(gx)) << 32 | Int64(bitPattern: UInt64(UInt32(bitPattern: Int32(gz))))
+                grid[key, default: []].append(p)
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.treeRoot.removeFromParentNode()
+                self.treeRoot = newRoot
+                self.rootNode.addChildNode(newRoot)
+                self.treePositions = positions
+                self.treeGrid = grid
+                self.isLevelReady = true
+            }
+        }
+    }
+
     private func buildAllTrees() {
         streamTrees(zStart: -40, zEnd: trackLength + 30)
     }
 
     private func streamTrees(zStart: Float, zEnd: Float) {
         let geos = treeGeoms; let cGeos = canopyGeoms; let bGeos = bushGeoms
-        let fGeos = fernGeoms
+        let fGeos = fernGeoms; let rfGeos = rootFlareGeoms
         let gtGeoCapture = giantTrunkGeo; let gcGeoCapture = giantCanopyGeo
         let heights = treeHeights; let cRadii = canopyRadii; let tRadii = trunkRadii; let bRadii = bushRadii
         let crashSpeeds = treeCrashSpeed; let smashPenalties = treeSmashPenalty
@@ -626,6 +1432,14 @@ final class SpeedBikeScene: SCNScene {
                             trunk.position = SCNVector3(tx, h * 0.5, tz); trunk.scale = SCNVector3(1, hScale, 1)
                             if !treeShadows { trunk.castsShadow = false }
                             treeNode.addChildNode(trunk)
+                            // Root flare at base
+                            if gIdx < rfGeos.count {
+                                let flare = SCNNode(geometry: rfGeos[gIdx])
+                                let flareH = heights[gIdx] * 0.12 * hScale
+                                flare.position = SCNVector3(tx, flareH * 0.5, tz)
+                                flare.scale = SCNVector3(1, hScale, 1)
+                                flare.castsShadow = false; treeNode.addChildNode(flare)
+                            }
                             let canopy = SCNNode(geometry: cGeos[gIdx])
                             if gIdx >= 3 && gIdx <= 4 {
                                 canopy.position = SCNVector3(tx, h * 0.55, tz)
@@ -933,6 +1747,23 @@ final class SpeedBikeScene: SCNScene {
         trailNode.addParticleSystem(trail)
         speederBody.addChildNode(trailNode)
 
+        // Water spray — activated when flying over water
+        let spray = SCNParticleSystem()
+        spray.birthRate = 0  // off by default
+        spray.emissionDuration = -1; spray.particleLifeSpan = 0.8; spray.particleLifeSpanVariation = 0.3
+        spray.particleSize = 0.15; spray.particleSizeVariation = 0.10
+        spray.spreadingAngle = 45; spray.particleVelocity = 6; spray.particleVelocityVariation = 3
+        spray.emittingDirection = SCNVector3(0, 1, 0)  // spray upward
+        spray.particleColor = UIColor(red: 0.70, green: 0.85, blue: 0.95, alpha: 0.45)
+        spray.particleColorVariation = SCNVector4(0.05, 0.05, 0.05, 0.15)
+        spray.blendMode = .alpha; spray.isLightingEnabled = false
+        spray.acceleration = SCNVector3(0, -8, 0)  // falls back down
+        waterSpray = spray
+        let sprayNode = SCNNode(); sprayNode.position = SCNVector3(0, -0.5, 0)
+        sprayNode.addParticleSystem(spray)
+        waterSprayNode = sprayNode
+        speederPivot.addChildNode(sprayNode)
+
         speederPivot.addChildNode(speederBody)
         speederPivot.position = SCNVector3(worldX, 5, worldZ)
         rootNode.addChildNode(speederPivot)
@@ -941,11 +1772,12 @@ final class SpeedBikeScene: SCNScene {
     // MARK: - Camera
     private func buildCamera() {
         let cam = SCNCamera()
-        cam.fieldOfView = 88; cam.motionBlurIntensity = 0; cam.zNear = 0.10; cam.zFar = 800
+        cam.fieldOfView = 88; cam.motionBlurIntensity = 0; cam.zNear = 0.10
+        cam.zFar = mode == .openWorld ? 4000 : 800
         cam.wantsHDR = quality.wantsHDR
         cam.bloomIntensity = quality.bloomIntensity; cam.bloomThreshold = quality.bloomThreshold; cam.bloomBlurRadius = quality.bloomBlurRadius
         cam.contrast = quality.contrast; cam.saturation = quality.saturation
-        cam.vignettingIntensity = 0.55; cam.vignettingPower = 1.0
+        cam.vignettingIntensity = 0.35; cam.vignettingPower = 1.2
         cam.exposureAdaptationBrighteningSpeedFactor = 0; cam.exposureAdaptationDarkeningSpeedFactor = 0
         if quality == .high {
             cam.wantsDepthOfField = true; cam.fStop = 5.6; cam.focalBlurSampleCount = 4
@@ -973,7 +1805,7 @@ final class SpeedBikeScene: SCNScene {
     }
 
     // MARK: - Update
-    func update(dt: Float, steer: Float, throttling: Bool, braking: Bool) {
+    func update(dt: Float, steer: Float, throttling: Bool, braking: Bool, lift: Float = 0) {
         guard isLevelReady else { updateCamera(dt: dt); return }
         guard raceState != .crashed else { updateCamera(dt: dt); return }
 
@@ -993,10 +1825,14 @@ final class SpeedBikeScene: SCNScene {
 
         // Race state
         switch raceState {
-        case .waiting: if worldZ > 5 { raceState = .racing }
+        case .waiting:
+            if mode == .openWorld {
+                if forwardSpeed > 1 { raceState = .racing }
+            } else {
+                if worldZ > 5 { raceState = .racing }
+            }
         case .racing:
             raceTime += dt
-            // Checkpoint detection (gates every 250m)
             if mode == .race {
                 let cpIdx = Int(worldZ / 250)
                 if cpIdx > lastCheckpointIndex && cpIdx > 0 && worldZ < trackLength {
@@ -1008,7 +1844,6 @@ final class SpeedBikeScene: SCNScene {
                     raceState = .finished
                     finishCamActive = true; finishCamTimer = 0
                     finishWorldPos = SCNVector3(worldX, speederY, worldZ)
-                    // Celebratory particles at finish
                     spawnFinishCelebration(at: finishWorldPos)
                 }
             }
@@ -1028,11 +1863,13 @@ final class SpeedBikeScene: SCNScene {
         }
         if !isBoosting {
             if braking {
-                forwardSpeed = max(0, forwardSpeed - 60*dt)              // brake to stop, no reverse
+                forwardSpeed = max(-20, forwardSpeed - 60*dt)            // brake then reverse
             } else if throttling {
                 forwardSpeed = min(forwardSpeed + 38*dt, maxNormalSpeed)
-            } else {
+            } else if forwardSpeed > 0 {
                 forwardSpeed = max(0, forwardSpeed - 12*dt)              // coast to stop
+            } else {
+                forwardSpeed = min(0, forwardSpeed + 12*dt)              // coast to stop from reverse
             }
         }
 
@@ -1044,44 +1881,85 @@ final class SpeedBikeScene: SCNScene {
         worldX += sin(heading) * forwardSpeed * dt
         worldZ += cos(heading) * forwardSpeed * dt
 
-        // Prevent going behind start
-        if worldZ < -15 { worldZ = -15; forwardSpeed *= 0.5 }
-
-        // Outer forest wall — soft bounce just inside the treeline edge
-        let lateral = worldX - trackCenterX(worldZ)
-        let forestEdge = difficulty.clearZone + 152.0
-        if abs(lateral) > forestEdge {
-            worldX = trackCenterX(worldZ) + (lateral > 0 ? forestEdge : -forestEdge)
-            forwardSpeed *= 0.65; turnRate *= -0.3
+        if mode == .openWorld {
+            // Water zone — speeder can float but slows down
+            let dist = sqrtf(worldX * worldX + worldZ * worldZ)
+            let shoreStart = islandRadius - 30  // where water begins
+            let hardLimit = islandRadius + 80    // max distance out to sea
+            if dist > shoreStart {
+                // Gradual drag on water — the further out, the stronger
+                let waterDepth = (dist - shoreStart) / (hardLimit - shoreStart)
+                forwardSpeed *= max(0.92, 1.0 - waterDepth * 0.06)
+            }
+            if dist > hardLimit {
+                let scale = hardLimit / dist
+                worldX *= scale; worldZ *= scale
+                forwardSpeed *= 0.7; turnRate *= -0.2
+            }
+        } else {
+            // Prevent going behind start
+            if worldZ < -15 { worldZ = -15; forwardSpeed *= 0.5 }
+            // Outer forest wall — soft bounce just inside the treeline edge
+            let lateral = worldX - trackCenterX(worldZ)
+            let forestEdge = difficulty.clearZone + 152.0
+            if abs(lateral) > forestEdge {
+                worldX = trackCenterX(worldZ) + (lateral > 0 ? forestEdge : -forestEdge)
+                forwardSpeed *= 0.65; turnRate *= -0.3
+            }
         }
 
         // Tree collision
         resolveTreeCollisions()
         resolveObstacleCollisions()
 
-        // Hover physics with organic bob
-        let bob1 = sin(timeAccum * 1.7 * .pi * 2) * 0.13
-        let bob2 = sin(timeAccum * 2.9 * .pi * 2) * 0.055
-        let bobScale = 0.5 + forwardSpeed / maxNormalSpeed * 0.9
-        let hoverTarget: Float = 1.35 + (bob1 + bob2) * bobScale
-        var accel: Float = -24.0
-        if speederY < 3.0 { accel += (hoverTarget - speederY) * 55.0 - velocityY * 14.0 }
+        // Hover physics — soft, floaty suspension with elastic bounce
+        let terrainH = terrainHeight(worldX, worldZ)
+        let groundH = max(terrainH, waterLevel)                 // float on water or terrain
+        let bob1 = sin(timeAccum * 1.1 * .pi * 2) * 0.18
+        let bob2 = sin(timeAccum * 1.8 * .pi * 2) * 0.08
+        let bob3 = sin(timeAccum * 0.4 * .pi * 2) * 0.10       // slow sway
+        let speedRat = min(abs(forwardSpeed) / maxNormalSpeed, 1.0)
+        let bobScale = 0.5 + speedRat * 0.9
+        let hoverTarget: Float = groundH + 1.35 + (bob1 + bob2 + bob3) * bobScale
+        var accel: Float = -16.0
+        accel += lift * 120.0                                   // strong lift — can reach treetop height
+        let damping: Float = 5.0 + speedRat * 6.0              // softer suspension for flight feel
+        let maxHover = groundH + 45.0                           // medium tree height (~42)
+        if speederY < maxHover { accel += (hoverTarget - speederY) * 35.0 - velocityY * damping }
         velocityY += accel * dt; speederY += velocityY * dt
-        if speederY < 0.4 { speederY = 0.4; velocityY = max(velocityY, 0) }
+        let floorH = groundH + 0.4
+        if speederY < floorH { speederY = floorH; velocityY = max(velocityY, 0) }
+        if speederY > groundH + 44.0 { speederY = groundH + 44.0; velocityY = min(velocityY, 0) }
 
         // Speeder nodes
         speederPivot.position    = SCNVector3(worldX, speederY, worldZ)
         speederPivot.eulerAngles = SCNVector3(0, heading, 0)
         bankAngle  += (-(turnRate / maxTurnRate) * 1.05 - bankAngle)  * min(1, dt * 5.5)
-        pitchAngle += (-velocityY * 0.022 - pitchAngle) * min(1, dt * 6)
+        pitchAngle += (-velocityY * 0.045 - pitchAngle) * min(1, dt * 4.5)
         speederBody.eulerAngles = SCNVector3(pitchAngle, 0, bankAngle)
+
+        // Water spray — activate when hovering over water
+        if let spray = waterSpray {
+            let overWater = terrainH < waterLevel && mode == .openWorld
+            let spd = abs(forwardSpeed)
+            let heightAboveWater = speederY - waterLevel
+            if overWater && spd > 5 && heightAboveWater < 4.0 {
+                // Spray intensity scales with speed and proximity to water
+                let proximity = max(0, 1.0 - heightAboveWater / 4.0)
+                let speedScale = min(1.0, spd / 50.0)
+                spray.birthRate = CGFloat(proximity * speedScale) * 120
+                spray.particleVelocity = CGFloat(3 + spd * 0.1)
+            } else {
+                spray.birthRate = 0
+            }
+        }
 
         updateCamera(dt: dt)
     }
 
     private func updateCamera(dt: Float) {
         let camDist: Float = 5.5
-        camY += (speederY + 1.60 - camY) * min(1, dt * 7)
+        camY += (speederY + 1.60 - camY) * min(1, dt * 4.5)
         camY  = max(camY, speederY + 0.70)
         let speedRatio = Double(forwardSpeed / maxBoostSpeed)
         let t = forwardSpeed / maxBoostSpeed
@@ -1100,7 +1978,8 @@ final class SpeedBikeScene: SCNScene {
         let lookDist: Float = 10 + Float(speedRatio) * 18
         cameraNode.look(at: SCNVector3(worldX + sin(heading)*lookDist, speederY - 0.30, worldZ + cos(heading)*lookDist),
                         up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
-        let bankTarget = (turnRate / maxTurnRate) * 0.82 + trackBankAngle(worldZ) * 0.85
+        let trackBank: Float = mode == .openWorld ? 0 : trackBankAngle(worldZ) * 0.85
+        let bankTarget = (turnRate / maxTurnRate) * 0.82 + trackBank
         camBankAngle += (bankTarget - camBankAngle) * min(1, dt * 7)
         cameraNode.simdOrientation = simd_mul(cameraNode.simdOrientation,
                                               simd_quatf(angle: camBankAngle, axis: SIMD3<Float>(0, 0, 1)))
@@ -1110,6 +1989,16 @@ final class SpeedBikeScene: SCNScene {
         let targetFOV = 88.0 + speedRatio * 36.0 + boostFOVKick
         currentFOV += (targetFOV - currentFOV) * Double(min(1, dt * 3.5))
         cameraNode.camera?.fieldOfView = currentFOV
+
+        // Dynamic vignetting — subtle at rest, more at speed, eased during boost
+        if let cam = cameraNode.camera {
+            let baseVig: CGFloat = 0.25
+            let speedVig = CGFloat(speedRatio) * 0.30
+            let boostVig: CGFloat = isBoosting ? 0.15 : 0
+            let targetVig = baseVig + speedVig + boostVig
+            let curVig = cam.vignettingIntensity
+            cam.vignettingIntensity = curVig + (targetVig - curVig) * CGFloat(min(1, dt * 4))
+        }
 
         // Motion blur
         let targetBlur = speedRatio * 0.46
@@ -1121,11 +2010,7 @@ final class SpeedBikeScene: SCNScene {
             cam.focusDistance = CGFloat(lookDist * 0.7)
         }
 
-        // Infinite mode: stream trees
-        if mode == .infinite && abs(worldZ - lastTreeZ) > quality.streamRange * 0.30 {
-            lastTreeZ = worldZ
-            streamTrees(zStart: worldZ - quality.streamRange * 0.6, zEnd: worldZ + quality.streamRange)
-        }
+        // (streaming removed — open world builds all trees at init)
 
         // Thruster trail — smooth boost transition
         let targetTrailRate = CGFloat(max(0, forwardSpeed / maxBoostSpeed)) * 40 + (isBoosting ? 60 : 0)
@@ -1140,10 +2025,12 @@ final class SpeedBikeScene: SCNScene {
             thrusterTrail?.particleSize = 0.04
         }
 
-        // Dynamic fog color — shifts warmer in tight curves
-        let curveIntensity = curvature(worldZ)
-        currentFogLerp += (curveIntensity - currentFogLerp) * min(1, dt * 2)
-        fogColor = lerpColor(fogColorOpen, fogColorDense, currentFogLerp)
+        // Dynamic fog color — shifts warmer in tight curves (race only)
+        if mode == .race {
+            let curveIntensity = curvature(worldZ)
+            currentFogLerp += (curveIntensity - currentFogLerp) * min(1, dt * 2)
+            fogColor = lerpColor(fogColorOpen, fogColorDense, currentFogLerp)
+        }
 
         for n in skyNodes { n.position = SCNVector3(worldX, 0, worldZ) }
         sunNode.position = SCNVector3(worldX + 480, 430, worldZ - 880)
