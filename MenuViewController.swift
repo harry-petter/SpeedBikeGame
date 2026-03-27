@@ -10,7 +10,7 @@ enum Difficulty: String, CaseIterable {
     var clearZone:   Float  { 16.0 }
 }
 
-enum GameMode { case race, openWorld }
+enum GameMode: CaseIterable { case race, openWorld }
 
 enum GraphicsQuality: String, CaseIterable {
     case low, medium, high
@@ -21,16 +21,16 @@ enum GraphicsQuality: String, CaseIterable {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "gfxQuality") }
     }
 
-    var msaaMode: SCNAntialiasingMode { switch self { case .low: return .none; case .medium: return .multisampling2X; case .high: return .multisampling4X } }
+    var msaaMode: SCNAntialiasingMode { switch self { case .low: return .multisampling2X; case .medium: return .multisampling4X; case .high: return .multisampling4X } }
     var wantsHDR: Bool    { self != .low }
-    var bloomIntensity:  CGFloat { switch self { case .low: return 0;    case .medium: return 2.2; case .high: return 3.8 } }
-    var bloomThreshold:  CGFloat { switch self { case .low: return 1;    case .medium: return 0.52; case .high: return 0.38 } }
-    var bloomBlurRadius: CGFloat { switch self { case .low: return 0;    case .medium: return 14;  case .high: return 22 } }
-    var contrast:    CGFloat { switch self { case .low: return 0.18; case .medium: return 0.32; case .high: return 0.42 } }
-    var saturation:  CGFloat { switch self { case .low: return 1.30; case .medium: return 1.50; case .high: return 1.60 } }
+    var bloomIntensity:  CGFloat { switch self { case .low: return 0;    case .medium: return 0.35; case .high: return 0.55 } }
+    var bloomThreshold:  CGFloat { switch self { case .low: return 1;    case .medium: return 0.92; case .high: return 0.88 } }
+    var bloomBlurRadius: CGFloat { switch self { case .low: return 0;    case .medium: return 4;    case .high: return 6 } }
+    var contrast:    CGFloat { switch self { case .low: return 0.05; case .medium: return 0.08; case .high: return 0.10 } }
+    var saturation:  CGFloat { switch self { case .low: return 1.05; case .medium: return 1.10; case .high: return 1.12 } }
     var shadowsEnabled: Bool  { self != .low }
-    var shadowMapSize:  CGSize { switch self { case .low: return .zero; case .medium: return CGSize(width: 1024, height: 1024); case .high: return CGSize(width: 2048, height: 2048) } }
-    var shadowSamples:  Int   { switch self { case .low: return 1; case .medium: return 4; case .high: return 8 } }
+    var shadowMapSize:  CGSize { switch self { case .low: return .zero; case .medium: return CGSize(width: 2048, height: 2048); case .high: return CGSize(width: 4096, height: 4096) } }
+    var shadowSamples:  Int   { switch self { case .low: return 1; case .medium: return 6; case .high: return 12 } }
     var treesCastShadows: Bool { self == .high }
     var streamRange:   Float { switch self { case .low: return 200; case .medium: return 260; case .high: return 330 } }
     var streamTrigger: Float { streamRange * 0.44 }
@@ -55,6 +55,15 @@ struct BestTimes {
         let ex = UserDefaults.standard.float(forKey: k)
         let better = ex == 0 || value < ex
         if better { UserDefaults.standard.set(value, forKey: k) }
+    }
+    static func resetAll() {
+        for d in Difficulty.allCases {
+            for m in GameMode.allCases {
+                let k = key(d, m)
+                UserDefaults.standard.removeObject(forKey: k)
+                UserDefaults.standard.removeObject(forKey: "\(m == .race ? "race" : "inf")_\(d.rawValue)_splits")
+            }
+        }
     }
     static func formatted(_ d: Difficulty, _ m: GameMode) -> String {
         guard m == .race, let v = get(d, m) else { return "--" }
@@ -464,16 +473,17 @@ final class MenuViewController: UIViewController {
         // Capture selections
         let diff = selectedDifficulty; let mode = selectedMode; let quality = selectedQuality
 
-        // Build the scene (expensive) off-main, then present the VC on main
-        DispatchQueue.global(qos: .userInitiated).async {
+        // Build the scene on main thread (UIGraphics/SceneKit require it).
+        // The loading screen is already visible; heavy tree generation runs
+        // on its own background queue inside SpeedBikeScene, so the brief
+        // main-thread block is just geometry setup — not the full forest.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             let scene = SpeedBikeScene(difficulty: diff, mode: mode, quality: quality)
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                let vc = GameViewController(difficulty: diff, mode: mode, quality: quality, scene: scene)
-                vc.modalPresentationStyle = .fullScreen
-                self.present(vc, animated: false) {
-                    loadingView.removeFromSuperview()
-                }
+            let vc = GameViewController(difficulty: diff, mode: mode, quality: quality, scene: scene)
+            vc.modalPresentationStyle = .fullScreen
+            self.present(vc, animated: false) {
+                loadingView.removeFromSuperview()
             }
         }
     }

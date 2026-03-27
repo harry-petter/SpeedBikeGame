@@ -27,6 +27,7 @@ final class GameViewController: UIViewController {
     private var lastTime: TimeInterval = 0
     private var isThrottling = false
     private var isBraking    = false
+    private var isBoosting   = false
     private var hudUpdatePending = false
     private var boostSatTimer: Float = 0
     private var liftBaseline: Float?
@@ -184,6 +185,13 @@ final class GameViewController: UIViewController {
     }
 
     private func setupCallbacks() {
+        // Safety timeout — if tree generation hasn't completed in 10s, force the level ready
+        // so the player isn't stuck on a black screen indefinitely
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self = self, !self.levelHasBeenReady else { return }
+            self.gameScene.forceLevelReady()
+        }
+
         gameScene.onCrash = { [weak self] in
             self?.playCrashHaptic()
             self?.doCrashShake()
@@ -360,7 +368,11 @@ final class GameViewController: UIViewController {
         btn.layer.borderColor   = UIColor(red: 0.30, green: 0.68, blue: 1.0, alpha: 0.68).cgColor
         btn.layer.shadowColor   = UIColor(red: 0.20, green: 0.55, blue: 1.0, alpha: 1).cgColor
         btn.layer.shadowRadius  = 10; btn.layer.shadowOpacity = 0.55; btn.layer.shadowOffset = .zero
-        btn.addTarget(self, action: #selector(boostPressed), for: .touchDown)
+        btn.addTarget(self, action: #selector(boostDown), for: .touchDown)
+        btn.addTarget(self, action: #selector(boostDown), for: .touchDragInside)
+        btn.addTarget(self, action: #selector(boostUp), for: .touchUpInside)
+        btn.addTarget(self, action: #selector(boostUp), for: .touchUpOutside)
+        btn.addTarget(self, action: #selector(boostUp), for: .touchCancel)
         return btn
     }
 
@@ -572,13 +584,18 @@ final class GameViewController: UIViewController {
         brakeButton.backgroundColor = UIColor(red: 0.12, green: 0.04, blue: 0.02, alpha: 0.65)
     }
 
-    @objc private func boostPressed() {
-        guard gameScene.boostFraction > 0.15 else { return }
-        gameScene.triggerBoost()
-        playHaptic(intensity: 0.8, sharpness: 0.5)
-        UIView.animate(withDuration: 0.06, animations: { self.boostButton.transform = CGAffineTransform(scaleX: 1.18, y: 1.18) },
-                       completion: { _ in UIView.animate(withDuration: 0.10) { self.boostButton.transform = .identity } })
-        boostSatTimer = 0.5  // smooth saturation pulse handled in render loop
+    @objc private func boostDown() {
+        gameScene.setBoostHeld(true)
+        if !isBoosting { playHaptic(intensity: 0.8, sharpness: 0.5); boostSatTimer = 0.5 }
+        isBoosting = true
+        UIView.animate(withDuration: 0.06) { self.boostButton.transform = CGAffineTransform(scaleX: 1.12, y: 1.12) }
+        boostButton.backgroundColor = UIColor(red: 0.10, green: 0.14, blue: 0.30, alpha: 0.85)
+    }
+    @objc private func boostUp() {
+        gameScene.setBoostHeld(false)
+        isBoosting = false
+        UIView.animate(withDuration: 0.15) { self.boostButton.transform = .identity }
+        boostButton.backgroundColor = UIColor(red: 0.04, green: 0.07, blue: 0.18, alpha: 0.76)
     }
 
     @objc private func resetPressed() {
@@ -623,17 +640,14 @@ final class GameViewController: UIViewController {
         }
         speedLabel.text = String(format: "%.0f", gameScene.currentSpeed)
 
-        // Boost energy ring
-        let energy = CGFloat(gameScene.boostFraction)
-        boostRing.strokeEnd = energy
+        // Boost ring — always full (unlimited), color indicates active state
+        boostRing.strokeEnd = 1.0
         if gameScene.isBoosting {
             boostRing.strokeColor = UIColor(red: 1.0, green: 0.5, blue: 0.15, alpha: 0.95).cgColor
-        } else if energy < 0.15 {
-            boostRing.strokeColor = UIColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 0.5).cgColor
         } else {
             boostRing.strokeColor = UIColor(red: 0.30, green: 0.75, blue: 1.0, alpha: 0.85).cgColor
         }
-        boostButton.alpha = energy < 0.15 ? 0.45 : 1.0
+        boostButton.alpha = 1.0
 
         switch gameScene.raceState {
         case .waiting:
@@ -708,7 +722,7 @@ extension GameViewController: SCNSceneRendererDelegate {
         guard lastTime != 0 else { lastTime = time; return }
         let dt = Float(min(time - lastTime, 1.0 / 20.0)); lastTime = time
         gameScene.update(dt: dt, steer: resolveSteer(), throttling: isThrottling, braking: isBraking, lift: resolveLift())
-        audioState.speed = max(0, gameScene.currentSpeed) / 80.0
+        audioState.speed = max(0, gameScene.currentSpeed) / (mode == .openWorld ? 104.0 : 80.0)
 
         // Boost engine pitch offset — spike on activate, spool down
         if gameScene.isBoosting {

@@ -1,0 +1,12 @@
+{
+  "/Users/harrypetter/Documents/Projects/SpeedBikeGame/AppDelegate.swift" : {
+    "abi-baseline-json" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame.abi.json",
+    "const-values" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame-primary.swiftconstvalues",
+    "dependencies" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame-primary.d",
+    "diagnostics" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame-primary.dia",
+    "objc-header" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame-Swift.h",
+    "swiftdoc" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame.swiftdoc",
+    "swiftmodule" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame.swiftmodule",
+    "swiftsourceinfo" : "/Users/harrypetter/Documents/Projects/SpeedBikeGame/build/SpeedBikeGame.build/Release-iphonesimulator/SpeedBikeGame.build/Objects-normal/arm64/SpeedBikeGame.swiftsourceinfo"
+  }
+}
