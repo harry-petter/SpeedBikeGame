@@ -31,6 +31,11 @@ final class GameViewController: UIViewController {
     private var hudUpdatePending = false
     private var boostSatTimer: Float = 0
     private var liftBaseline: Float?
+    private var feedbackClock: Float = 0
+    private var performanceClock: Float = 0
+    private var frameAverage: Double = 1.0 / 60
+    private var resolutionScale: CGFloat = 0.8
+    private var smoothSteer: Float = 0
 
     private lazy var boostButton:    UIButton = makeBoostButton()
     private lazy var throttleButton: UIButton = makeThrottleButton()
@@ -78,6 +83,26 @@ final class GameViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupView(); setupScene(); setupMotion(); setupHUD(); setupAudio(); setupHaptics(); setupCallbacks()
+        NotificationCenter.default.addObserver(self, selector: #selector(pauseForInterruption),
+            name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(resumeAfterInterruption),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func pauseForInterruption() {
+        scnView.isPlaying = false
+        isThrottling = false; isBraking = false; isBoosting = false
+        gameScene.setBoostHeld(false)
+        lastTime = 0; motion.stopDeviceMotionUpdates()
+        audioEngine.pause(); stopContinuousHaptic()
+    }
+
+    @objc private func resumeAfterInterruption() {
+        guard viewIfLoaded?.window != nil else { return }
+        lastTime = 0; frameAverage = 1.0 / 60; resetLiftBaseline()
+        setupMotion(); try? audioEngine.start()
+        try? hapticEngine?.start(); startContinuousHaptic()
+        scnView.isPlaying = true
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -96,7 +121,7 @@ final class GameViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         scnView.frame = view.bounds
-        let b = view.bounds
+        let b = view.bounds.inset(by: view.safeAreaInsets)
         boostButton.frame    = CGRect(x: b.maxX - 90, y: b.maxY - 86, width: 68, height: 68)
         throttleButton.frame = CGRect(x: b.maxX - 176, y: b.maxY - 80, width: 58, height: 58)
         brakeButton.frame    = CGRect(x: b.minX + 20,  y: b.maxY - 80, width: 58, height: 58)
@@ -109,7 +134,7 @@ final class GameViewController: UIViewController {
         speedBar.frame       = CGRect(x: b.maxX - 28, y: b.midY - 60, width: 10, height: 120)
         loadingLabel.frame   = CGRect(x: b.midX - 100, y: b.midY - 12, width: 200, height: 24)
         splitLabel.frame     = CGRect(x: b.midX - 80, y: b.minY + 46, width: 160, height: 28)
-        nearMissEdge.frame   = b
+        nearMissEdge.frame   = view.bounds
         speedLabel.frame     = CGRect(x: b.maxX - 54, y: b.midY + 64, width: 62, height: 18)
         // Boost ring tracks the boost button
         let ringPath = UIBezierPath(arcCenter: CGPoint(x: 34, y: 34), radius: 37,
@@ -122,6 +147,8 @@ final class GameViewController: UIViewController {
         view.backgroundColor = .black
         scnView.frame = view.bounds; scnView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scnView.antialiasingMode = quality.msaaMode
+        resolutionScale = quality.renderScale
+        scnView.contentScaleFactor = UIScreen.main.scale * resolutionScale
         scnView.preferredFramesPerSecond = 60; scnView.backgroundColor = .black
         scnView.alpha = 0  // hidden until level trees are ready
         view.addSubview(scnView)
@@ -176,6 +203,7 @@ final class GameViewController: UIViewController {
         ], relativeTime: 0, duration: 300)
         guard let pattern = try? CHHapticPattern(events: [event], parameters: []) else { return }
         continuousHapticPlayer = try? engine.makeAdvancedPlayer(with: pattern)
+        continuousHapticPlayer?.loopEnabled = true
         try? continuousHapticPlayer?.start(atTime: CHHapticTimeImmediate)
     }
 
@@ -185,11 +213,10 @@ final class GameViewController: UIViewController {
     }
 
     private func setupCallbacks() {
-        // Safety timeout — if tree generation hasn't completed in 10s, force the level ready
-        // so the player isn't stuck on a black screen indefinitely
+        // Keep loading honest: never allow driving before collision geometry is installed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self = self, !self.levelHasBeenReady else { return }
-            self.gameScene.forceLevelReady()
+            self.loadingLabel.text = "PREPARING FOREST..."
         }
 
         gameScene.onCrash = { [weak self] in
@@ -326,7 +353,11 @@ final class GameViewController: UIViewController {
             let lpfCoeff: Double = 0.92 - spd * 0.12
             let ablPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
             for frame in 0..<Int(frameCount) {
-                let noise: Double = Double.random(in: -1...1)
+                // Deterministic lightweight noise avoids system RNG calls for every audio sample.
+                state.noiseSeed ^= state.noiseSeed << 13
+                state.noiseSeed ^= state.noiseSeed >> 17
+                state.noiseSeed ^= state.noiseSeed << 5
+                let noise = Double(state.noiseSeed) / Double(UInt32.max) * 2 - 1
                 let oneMinusLPF: Double = 1.0 - lpfCoeff
                 state.windPhase = state.windPhase * lpfCoeff + noise * oneMinusLPF
                 state.windLPF = state.windLPF * 0.85 + state.windPhase * 0.15
@@ -713,6 +744,7 @@ private final class AudioState {
     var speed: Float  = 0
     var windPhase: Double = 0
     var windLPF: Double = 0     // low-pass filtered wind
+    var noiseSeed: UInt32 = 0x91e10da5
     var boostPitchOffset: Double = 0
 }
 
@@ -720,9 +752,48 @@ private final class AudioState {
 extension GameViewController: SCNSceneRendererDelegate {
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         guard lastTime != 0 else { lastTime = time; return }
-        let dt = Float(min(time - lastTime, 1.0 / 20.0)); lastTime = time
-        gameScene.update(dt: dt, steer: resolveSteer(), throttling: isThrottling, braking: isBraking, lift: resolveLift())
-        audioState.speed = max(0, gameScene.currentSpeed) / (mode == .openWorld ? 104.0 : 80.0)
+        let elapsed = max(0, time - lastTime); lastTime = time
+        let dt = Float(min(elapsed, 1.0 / 15.0))
+        var steer = resolveSteer()
+        let lift = resolveLift()
+        var throttle = isThrottling
+        #if DEBUG
+        if CommandLine.arguments.contains("--autopilot") {
+            steer = gameScene.previewSteer; throttle = true
+        }
+        #endif
+        smoothSteer += (steer - smoothSteer) * (1 - exp(-dt * 12))
+        // Bounded substeps keep the hover spring stable after a missed frame.
+        let steps = max(1, Int(ceil(dt / (1.0 / 120.0))))
+        for _ in 0..<steps {
+            gameScene.update(dt: dt / Float(steps), steer: smoothSteer,
+                             throttling: throttle, braking: isBraking, lift: lift)
+        }
+        audioState.speed = min(1, gameScene.speedFraction)
+        frameAverage += (min(elapsed, 0.1) - frameAverage) * 0.03
+        performanceClock += dt
+        if performanceClock >= 3 && gameScene.isLevelReady {
+            #if DEBUG
+            if CommandLine.arguments.contains("--diagnostics") {
+                print("SPEEDER \(gameScene.diagnostics) frame=\(frameAverage) scale=\(resolutionScale)")
+            }
+            #endif
+            performanceClock = 0
+            let thermal = ProcessInfo.processInfo.thermalState
+            let hot = thermal == .serious || thermal == .critical
+            var nextScale = resolutionScale
+            if hot || frameAverage > 0.019 { nextScale = max(0.60, resolutionScale - 0.05) }
+            else if frameAverage < 0.0172 && thermal == .nominal {
+                nextScale = min(quality.renderScale, resolutionScale + 0.025)
+            }
+            gameScene.performancePressure = hot ? 1 : Float(max(0, quality.renderScale - nextScale) / 0.4)
+            if nextScale != resolutionScale {
+                resolutionScale = nextScale
+                DispatchQueue.main.async { [weak self] in
+                    self?.scnView.contentScaleFactor = UIScreen.main.scale * nextScale
+                }
+            }
+        }
 
         // Boost engine pitch offset — spike on activate, spool down
         if gameScene.isBoosting {
@@ -744,7 +815,10 @@ extension GameViewController: SCNSceneRendererDelegate {
         }
 
         // Continuous speed haptic — subtle rumble that scales with speed
-        let speedHaptic = gameScene.speedFraction * gameScene.speedFraction * 0.22
+        feedbackClock += dt
+        guard feedbackClock >= 1.0 / 30.0 else { return }
+        feedbackClock = 0
+        let speedHaptic = min(1, gameScene.speedFraction * gameScene.speedFraction * 0.22)
         try? continuousHapticPlayer?.sendParameters(
             [CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: speedHaptic, relativeTime: 0)],
             atTime: CHHapticTimeImmediate)

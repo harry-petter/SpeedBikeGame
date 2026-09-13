@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        CC0000000000000000000001 /* VisualAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000002; };
 		BB0000000000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000011 /* AppDelegate.swift */; };
 		BB0000000000000000000002 /* GameViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000012 /* GameViewController.swift */; };
 		BB0000000000000000000003 /* SpeedBikeScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000013 /* SpeedBikeScene.swift */; };
@@ -17,6 +18,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+        CC0000000000000000000002 /* VisualAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualAssets.swift; sourceTree = "<group>"; };
 		BB0000000000000000000011 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		BB0000000000000000000012 /* GameViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameViewController.swift; sourceTree = "<group>"; };
 		BB0000000000000000000013 /* SpeedBikeScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedBikeScene.swift; sourceTree = "<group>"; };
@@ -45,6 +47,7 @@
 				BB0000000000000000000011 /* AppDelegate.swift */,
 				BB0000000000000000000012 /* GameViewController.swift */,
 				BB0000000000000000000013 /* SpeedBikeScene.swift */,
+                CC0000000000000000000002 /* VisualAssets.swift */,
 				BB0000000000000000000014 /* TerrainGenerator.swift */,
 				BB0000000000000000000015 /* Assets.xcassets */,
 				BB0000000000000000000016 /* Info.plist */,
@@ -134,6 +137,7 @@
 				BB0000000000000000000001 /* AppDelegate.swift in Sources */,
 				BB0000000000000000000002 /* GameViewController.swift in Sources */,
 				BB0000000000000000000003 /* SpeedBikeScene.swift in Sources */,
+                CC0000000000000000000001 /* VisualAssets.swift in Sources */,
 				BB0000000000000000000004 /* TerrainGenerator.swift in Sources */,
 				BB0000000000000000000006 /* GrassGenerator.swift in Sources */,
 				BB0000000000000000000007 /* MenuViewController.swift in Sources */,

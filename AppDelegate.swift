@@ -17,6 +17,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
         let win = UIWindow(frame: UIScreen.main.bounds)
         win.rootViewController =  MenuViewController()
+        #if DEBUG
+        // Deterministic simulator entry points for visual and loading regression checks.
+        if CommandLine.arguments.contains("--preview-race") || CommandLine.arguments.contains("--preview-world") {
+            let mode: GameMode = CommandLine.arguments.contains("--preview-world") ? .openWorld : .race
+            win.rootViewController = GameViewController(difficulty: .easy, mode: mode, quality: .medium)
+        }
+        #endif
         win.makeKeyAndVisible()
         window = win
         return true

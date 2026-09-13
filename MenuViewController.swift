@@ -14,14 +14,15 @@ enum GameMode: CaseIterable { case race, openWorld }
 
 enum GraphicsQuality: String, CaseIterable {
     case low, medium, high
-    var displayName: String { switch self { case .low: return "LOW"; case .medium: return "MED"; case .high: return "HIGH" } }
+    var displayName: String { switch self { case .low: return "ECO"; case .medium: return "BALANCED"; case .high: return "ULTRA" } }
 
     static var saved: GraphicsQuality {
         get { GraphicsQuality(rawValue: UserDefaults.standard.string(forKey: "gfxQuality") ?? "medium") ?? .medium }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "gfxQuality") }
     }
 
-    var msaaMode: SCNAntialiasingMode { switch self { case .low: return .multisampling2X; case .medium: return .multisampling4X; case .high: return .multisampling4X } }
+    var msaaMode: SCNAntialiasingMode { self == .high ? .multisampling4X : .multisampling2X }
+    var renderScale: CGFloat { self == .low ? 0.65 : self == .medium ? 0.80 : 1.0 }
     var wantsHDR: Bool    { self != .low }
     var bloomIntensity:  CGFloat { switch self { case .low: return 0;    case .medium: return 0.35; case .high: return 0.55 } }
     var bloomThreshold:  CGFloat { switch self { case .low: return 1;    case .medium: return 0.92; case .high: return 0.88 } }
@@ -29,8 +30,8 @@ enum GraphicsQuality: String, CaseIterable {
     var contrast:    CGFloat { switch self { case .low: return 0.05; case .medium: return 0.08; case .high: return 0.10 } }
     var saturation:  CGFloat { switch self { case .low: return 1.05; case .medium: return 1.10; case .high: return 1.12 } }
     var shadowsEnabled: Bool  { self != .low }
-    var shadowMapSize:  CGSize { switch self { case .low: return .zero; case .medium: return CGSize(width: 2048, height: 2048); case .high: return CGSize(width: 4096, height: 4096) } }
-    var shadowSamples:  Int   { switch self { case .low: return 1; case .medium: return 6; case .high: return 12 } }
+    var shadowMapSize:  CGSize { self == .low ? .zero : CGSize(width: 2048, height: 2048) }
+    var shadowSamples:  Int   { self == .high ? 4 : 2 }
     var treesCastShadows: Bool { self == .high }
     var streamRange:   Float { switch self { case .low: return 200; case .medium: return 260; case .high: return 330 } }
     var streamTrigger: Float { streamRange * 0.44 }
@@ -92,9 +93,11 @@ final class MenuViewController: UIViewController {
     // Panels
     private var panels: [UIView] = []
     private var currentPanel = 0
+    private let hangarView = SCNView()
 
     override func viewDidLoad()      { super.viewDidLoad(); buildUI() }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshBestLabel() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshBestLabel(); hangarView.isPlaying = true }
+    override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); hangarView.isPlaying = false }
     override var prefersStatusBarHidden: Bool { true }
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
@@ -112,6 +115,7 @@ final class MenuViewController: UIViewController {
         grad.locations = [0, 0.5, 1]
         view.layer.insertSublayer(grad, at: 0)
         addAmbientGlow()
+        buildHangar()
 
         let p0 = buildTitlePanel()
         let p1 = buildGameSelectPanel()
@@ -135,6 +139,35 @@ final class MenuViewController: UIViewController {
     }
 
     // MARK: - Panel builders
+    private func buildHangar() {
+        hangarView.frame = view.bounds
+        hangarView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        hangarView.backgroundColor = .clear; hangarView.isUserInteractionEnabled = false
+        hangarView.preferredFramesPerSecond = 30; hangarView.antialiasingMode = .multisampling2X
+        hangarView.contentScaleFactor = UIScreen.main.scale * 0.75
+        let scene = SCNScene()
+        let bike = VisualAssets.bike()
+        bike.eulerAngles.y = -0.65
+        bike.position = SCNVector3(2.8, -0.4, 0)
+        scene.rootNode.addChildNode(bike)
+        let hover = SCNAction.sequence([.moveBy(x: 0, y: 0.12, z: 0, duration: 2.5),
+                                       .moveBy(x: 0, y: -0.12, z: 0, duration: 2.5)])
+        hover.timingMode = .easeInEaseOut; bike.runAction(.repeatForever(hover))
+        let camera = SCNCamera(); camera.fieldOfView = 48
+        camera.wantsHDR = true; camera.bloomIntensity = 0.2
+        let eye = SCNNode(); eye.camera = camera; eye.position = SCNVector3(0, 3, 10)
+        eye.look(at: SCNVector3(0, 0.2, 0)); scene.rootNode.addChildNode(eye)
+        for (position, color, intensity): (SCNVector3, UIColor, CGFloat) in [
+            (.init(-3, 5, 4), UIColor(red: 0.65, green: 0.82, blue: 1, alpha: 1), 350),
+            (.init(4, 3, -3), UIColor(red: 1, green: 0.55, blue: 0.25, alpha: 1), 500)] {
+            let light = SCNLight(); light.type = .omni; light.color = color; light.intensity = intensity
+            let n = SCNNode(); n.light = light; n.position = position; scene.rootNode.addChildNode(n)
+        }
+        scene.lightingEnvironment.contents = VisualAssets.environment()
+        scene.lightingEnvironment.intensity = 0.6
+        hangarView.scene = scene; hangarView.pointOfView = eye; hangarView.isPlaying = true
+        view.addSubview(hangarView)
+    }
 
     private func buildTitlePanel() -> UIView {
         let panel = UIView()
@@ -144,7 +177,7 @@ final class MenuViewController: UIViewController {
         titleLbl.layer.shadowColor = UIColor(red: 0.20, green: 0.60, blue: 0.35, alpha: 1).cgColor
         titleLbl.layer.shadowRadius = 18; titleLbl.layer.shadowOpacity = 0.6; titleLbl.layer.shadowOffset = .zero
 
-        let subtitleLbl = label("FOREST RUN", size: 11, weight: .semibold,
+        let subtitleLbl = label("FRONTIER • SCOUT DIVISION", size: 11, weight: .semibold,
                                 color: UIColor(red: 0.35, green: 0.65, blue: 0.45, alpha: 0.70))
         subtitleLbl.letterSpacing(6)
 
@@ -168,7 +201,8 @@ final class MenuViewController: UIViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            NSLayoutConstraint(item: stack, attribute: .centerX, relatedBy: .equal,
+                               toItem: panel, attribute: .trailing, multiplier: 0.30, constant: 0),
             stack.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
         ])
         return panel
@@ -237,7 +271,9 @@ final class MenuViewController: UIViewController {
 
         let backBtn = navButton("← BACK", action: #selector(goToTitle), secondary: true)
 
-        let stack = UIStackView(arrangedSubviews: [pageTitle, spacer(14), qualTitle, qualRow, spacer(18), backBtn])
+        let qualityNote = label("BALANCED • 60 FPS TARGET • ADAPTIVE RESOLUTION", size: 9,
+                                weight: .medium, color: UIColor(white: 0.62, alpha: 1))
+        let stack = UIStackView(arrangedSubviews: [pageTitle, spacer(14), qualTitle, qualRow, qualityNote, spacer(18), backBtn])
         stack.axis = .vertical; stack.alignment = .center; stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(stack)
